@@ -323,6 +323,140 @@ final class GitClientTests: XCTestCase {
         XCTAssertTrue(snapshot.changes.isEmpty)
     }
 
+    func testBranchRenameDeleteAndMerge() async throws {
+        let client = GitClient()
+
+        try write("base\n", to: "base.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Base"])
+
+        try await client.createBranch(name: "feature", at: repoURL, checkout: true)
+        try write("feature\n", to: "feature.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Feature"])
+
+        try await client.checkout(branch: "main", at: repoURL)
+        try write("main\n", to: "main.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Main"])
+
+        let cleanMerge = try await client.merge(branch: "feature", at: repoURL, identity: nil)
+        XCTAssertTrue(cleanMerge)
+
+        var snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertFalse(snapshot.hasChanges)
+        XCTAssertNil(snapshot.operation)
+
+        try await client.createBranch(name: "temp", at: repoURL, checkout: false)
+        try await client.renameBranch(from: "temp", to: "renamed", at: repoURL)
+
+        snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertTrue(snapshot.localBranches.contains { $0.name == "renamed" })
+        XCTAssertFalse(snapshot.localBranches.contains { $0.name == "temp" })
+
+        try await client.deleteBranch("renamed", at: repoURL, force: true)
+        snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertFalse(snapshot.localBranches.contains { $0.name == "renamed" })
+    }
+
+    func testMergeConflictReportsOperation() async throws {
+        let client = GitClient()
+
+        try write("base\n", to: "shared.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Base"])
+
+        try git(["checkout", "-q", "-b", "feature"])
+        try write("feature\n", to: "shared.txt")
+        try git(["commit", "-q", "-am", "Feature edit"])
+
+        try git(["checkout", "-q", "main"])
+        try write("main\n", to: "shared.txt")
+        try git(["commit", "-q", "-am", "Main edit"])
+
+        let cleanMerge = try await client.merge(branch: "feature", at: repoURL, identity: nil)
+        XCTAssertFalse(cleanMerge)
+
+        let snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertEqual(snapshot.operation, .merge)
+        XCTAssertTrue(snapshot.changes.contains { $0.kind == .conflicted })
+    }
+
+    func testAmendAndUndoLastCommit() async throws {
+        let client = GitClient()
+
+        try write("one\n", to: "file.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Initial"])
+
+        try write("two\n", to: "file.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Second"])
+
+        try await client.amendCommit(message: "Second, amended", at: repoURL, identity: nil)
+        var history = try await client.history(at: repoURL)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(history.first?.subject, "Second, amended")
+
+        try await client.undoLastCommit(at: repoURL)
+        history = try await client.history(at: repoURL)
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history.first?.subject, "Initial")
+
+        var snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertTrue(snapshot.stagedChanges.contains { $0.path == "file.txt" })
+
+        // Undoing the root commit leaves an unborn branch with staged changes.
+        try await client.undoLastCommit(at: repoURL)
+        history = try await client.history(at: repoURL)
+        XCTAssertTrue(history.isEmpty)
+        snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertFalse(snapshot.hasCommits)
+    }
+
+    func testCherryPickCommit() async throws {
+        let client = GitClient()
+
+        try write("base\n", to: "base.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Base"])
+
+        try git(["checkout", "-q", "-b", "feature"])
+        try write("picked\n", to: "picked.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Pick me"])
+        let featureSHA = try runGit(["rev-parse", "HEAD"], in: repoURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        try git(["checkout", "-q", "main"])
+        try write("main\n", to: "main.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Main"])
+
+        let cleanPick = try await client.cherryPick(commit: featureSHA, at: repoURL, identity: nil)
+        XCTAssertTrue(cleanPick)
+
+        let history = try await client.history(at: repoURL)
+        XCTAssertEqual(history.first?.subject, "Pick me")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repoURL.appendingPathComponent("picked.txt").path))
+    }
+
+    func testRemoteManagement() async throws {
+        let client = GitClient()
+
+        try await client.addRemote(name: "origin", url: "https://example.com/first.git", at: repoURL)
+        var remotes = try await client.remotes(at: repoURL)
+        XCTAssertEqual(remotes, [GitRemote(name: "origin", url: "https://example.com/first.git")])
+
+        try await client.setRemoteURL(name: "origin", url: "https://example.com/second.git", at: repoURL)
+        remotes = try await client.remotes(at: repoURL)
+        XCTAssertEqual(remotes.first?.url, "https://example.com/second.git")
+
+        try await client.removeRemote(name: "origin", at: repoURL)
+        remotes = try await client.remotes(at: repoURL)
+        XCTAssertTrue(remotes.isEmpty)
+    }
+
     // MARK: - Helpers
 
     private func write(_ contents: String, to relativePath: String) throws {

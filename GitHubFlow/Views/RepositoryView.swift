@@ -226,6 +226,15 @@ struct RepositoryHeader: View {
                 .help("Publish “\(snapshot.branch)” to \(snapshot.remoteOrDefaultName)")
             }
 
+            if let snapshot = model.snapshot, !snapshot.hasRemote {
+                Button("Add Remote…") {
+                    model.sheet = .manageRemotes
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .disabled(model.isBusy)
+                .help("Add a remote so you can push this repository")
+            }
+
             BranchPicker()
         }
         .padding(.horizontal, 16)
@@ -315,6 +324,13 @@ struct BranchPicker: View {
 
             Button("New Branch…") { model.sheet = .newBranch }
                 .disabled(model.snapshot?.hasCommits == false)
+
+            Divider()
+
+            Button("Manage Branches…") { model.sheet = .manageBranches }
+                .disabled(model.snapshot?.hasCommits == false)
+
+            Button("Manage Remotes…") { model.sheet = .manageRemotes }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.triangle.branch")

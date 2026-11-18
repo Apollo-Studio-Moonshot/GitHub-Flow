@@ -38,7 +38,15 @@ no shell scripts, no hidden state. Everything you see comes from `git status`,
   browse saved stashes, apply or pop them, and permanently drop a stash with
   confirmation.
 - **Branches** — switch local or remote branches (remote branches create a
-  tracking branch), create a branch with or without switching to it.
+  tracking branch), create a branch with or without switching to it, and manage
+  branches in one place: merge another branch into the current one, rename a
+  branch, or delete it (with confirmation).
+- **Commit actions** — amend the latest commit (edit its message and/or include
+  more staged changes), undo the latest commit while keeping its changes staged,
+  cherry-pick any commit onto the current branch, and revert commits.
+- **Remotes** — add, edit, or remove remotes from a dedicated sheet. A repository
+  without a remote shows an *Add Remote…* button in the header so it can be
+  published afterwards.
 - **Sync** — fetch, pull, push, with ahead/behind badges and a one-click
   *Publish* for branches that have no upstream yet.
 - **Native details** — light/dark/automatic appearance, keyboard shortcuts,
@@ -144,6 +152,9 @@ holds extra keys that Xcode does not generate (automatic and sudden termination)
 - Stash saves include untracked files by default.
 - GitHub-specific features (pull requests, issues, Actions) are intentionally
   out of scope; a repository without a remote won't show a *Publish* button —
-  add a remote with `git remote add origin …` first.
+  open *Manage Remotes…* (or use `git remote add origin …`) first.
+- Merges and cherry-picks that conflict leave the repository in the corresponding
+  in-progress state; resolve the marked files in the Changes tab and commit to
+  finish.
 - Git LFS and signing are passed through to your git configuration; commits are
   created unsigned by default so no pinentry prompt blocks the app.

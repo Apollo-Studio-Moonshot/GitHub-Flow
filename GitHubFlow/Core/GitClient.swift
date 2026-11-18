@@ -378,6 +378,31 @@ actor GitClient {
         }
     }
 
+    func renameBranch(from oldName: String, to newName: String, at root: URL) async throws {
+        _ = try await run(["branch", "-m", oldName, newName], in: root)
+    }
+
+    func deleteBranch(_ name: String, at root: URL, force: Bool = false) async throws {
+        _ = try await run(["branch", force ? "-D" : "-d", name], in: root)
+    }
+
+    /// Merges `branch` into the current branch. Returns `false` when the merge
+    /// stopped with conflicts (the repository is then left mid-merge so the
+    /// user can resolve them in the Changes tab).
+    func merge(branch: String, at root: URL, identity: GitIdentity?) async throws -> Bool {
+        let result = try await run(
+            ["-c", "commit.gpgsign=false", "merge", "--no-edit", branch],
+            in: root,
+            allowFailure: true,
+            extraEnvironment: identityEnvironment(identity)
+        )
+        if !result.succeeded {
+            if await detectOperation(in: root) == .merge { return false }
+            throw GitError.commandFailed(command: "git merge \(branch)", message: result.failureMessage)
+        }
+        return true
+    }
+
     // MARK: - Remotes
 
     func fetch(at root: URL) async throws {
@@ -404,6 +429,38 @@ actor GitClient {
         _ = try await run(["push", "--set-upstream", remote, branch], in: root)
     }
 
+    func remotes(at root: URL) async throws -> [GitRemote] {
+        let result = try await run(["remote", "-v"], in: root, allowFailure: true)
+        guard result.succeeded else { return [] }
+
+        var remotes: [GitRemote] = []
+        var seen = Set<String>()
+        for line in result.stdout.split(separator: "\n") {
+            let fields = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            guard fields.count == 2 else { continue }
+            let name = String(fields[0])
+            guard seen.insert(name).inserted else { continue }
+            // `git remote -v` appends “ (fetch)” / “ (push)” to each URL.
+            let url = String(fields[1])
+                .replacingOccurrences(of: " (fetch)", with: "")
+                .replacingOccurrences(of: " (push)", with: "")
+            remotes.append(GitRemote(name: name, url: url))
+        }
+        return remotes.sorted { $0.name < $1.name }
+    }
+
+    func addRemote(name: String, url: String, at root: URL) async throws {
+        _ = try await run(["remote", "add", name, url], in: root)
+    }
+
+    func setRemoteURL(name: String, url: String, at root: URL) async throws {
+        _ = try await run(["remote", "set-url", name, url], in: root)
+    }
+
+    func removeRemote(name: String, at root: URL) async throws {
+        _ = try await run(["remote", "remove", name], in: root)
+    }
+
     // MARK: - Commits, cloning, creation
 
     func revert(commit sha: String, at root: URL, identity: GitIdentity?, isMerge: Bool = false) async throws {
@@ -425,6 +482,46 @@ actor GitClient {
         _ = try await run(arguments, in: root, extraEnvironment: environment)
     }
 
+    /// Applies `commit` on top of the current branch. Returns `false` when the
+    /// cherry-pick stopped with conflicts.
+    func cherryPick(commit sha: String, at root: URL, identity: GitIdentity?) async throws -> Bool {
+        let result = try await run(
+            ["-c", "commit.gpgsign=false", "cherry-pick", sha],
+            in: root,
+            allowFailure: true,
+            extraEnvironment: identityEnvironment(identity)
+        )
+        if !result.succeeded {
+            if await detectOperation(in: root) == .cherryPick { return false }
+            throw GitError.commandFailed(command: "git cherry-pick", message: result.failureMessage)
+        }
+        return true
+    }
+
+    func amendCommit(message: String, at root: URL, identity: GitIdentity?) async throws {
+        _ = try await run(
+            ["-c", "commit.gpgsign=false", "commit", "--amend", "--cleanup=whitespace", "-F", "-"],
+            in: root,
+            extraEnvironment: identityEnvironment(identity),
+            input: message
+        )
+    }
+
+    /// Removes the latest commit while keeping its changes staged. For a root
+    /// commit the branch is reset to an unborn state instead.
+    func undoLastCommit(at root: URL) async throws {
+        let parent = try await run(
+            ["rev-parse", "--verify", "--quiet", "HEAD~1"],
+            in: root,
+            allowFailure: true
+        )
+        if parent.succeeded {
+            _ = try await run(["reset", "--soft", "HEAD~1"], in: root)
+        } else {
+            _ = try await run(["update-ref", "-d", "HEAD"], in: root)
+        }
+    }
+
     func clone(remote: String, to destination: URL) async throws {
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
@@ -439,6 +536,20 @@ actor GitClient {
     }
 
     // MARK: - Helpers
+
+    private func identityEnvironment(_ identity: GitIdentity?) -> [String: String] {
+        var environment: [String: String] = [:]
+        guard let identity else { return environment }
+        if !identity.name.isEmpty {
+            environment["GIT_AUTHOR_NAME"] = identity.name
+            environment["GIT_COMMITTER_NAME"] = identity.name
+        }
+        if !identity.email.isEmpty {
+            environment["GIT_AUTHOR_EMAIL"] = identity.email
+            environment["GIT_COMMITTER_EMAIL"] = identity.email
+        }
+        return environment
+    }
 
     private func detectOperation(in root: URL) async -> RepoOperation? {
         let gitDirResult = try? await run(["rev-parse", "--absolute-git-dir"], in: root)

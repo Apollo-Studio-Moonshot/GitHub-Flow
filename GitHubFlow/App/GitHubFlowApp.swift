@@ -39,6 +39,22 @@ struct GitHubFlowApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                     .disabled(model.selectedRepository == nil)
 
+                Button("Manage Branches…") { model.sheet = .manageBranches }
+                    .disabled(model.selectedRepository == nil)
+
+                Button("Manage Remotes…") { model.sheet = .manageRemotes }
+                    .disabled(model.selectedRepository == nil)
+
+                Divider()
+
+                Button("Amend Last Commit…") {
+                    Task { await model.beginAmendLastCommit() }
+                }
+                .disabled(!model.canAmendLastCommit)
+
+                Button("Undo Last Commit…") { model.pendingUndoLastCommit = true }
+                    .disabled(!model.canAmendLastCommit)
+
                 Divider()
 
                 Button("Fetch") { Task { await model.fetch() } }

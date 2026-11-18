@@ -40,6 +40,8 @@ enum SheetRoute: String, Identifiable, Hashable {
     case clone
     case create
     case newBranch
+    case manageBranches
+    case manageRemotes
 
     var id: String { rawValue }
 }
@@ -117,7 +119,16 @@ final class AppModel {
     var pendingRevert: CommitInfo?
     var pendingDiscard: FileChange?
     var pendingStashDrop: StashInfo?
+    var pendingUndoLastCommit = false
+    var pendingBranchRename: BranchInfo?
+    var pendingBranchDelete: BranchInfo?
     var showsDiscardAllConfirmation = false
+
+    /// When true the commit composer edits the latest commit instead of
+    /// creating a new one.
+    var isAmendingLastCommit = false
+
+    private(set) var remotes: [GitRemote] = []
 
     // MARK: - Generation tokens
 
@@ -173,7 +184,7 @@ final class AppModel {
 
     var canCommit: Bool {
         selectedRepository != nil
-            && !stagedChanges.isEmpty
+            && (isAmendingLastCommit || !stagedChanges.isEmpty)
             && !commitSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !isBusy
     }
@@ -226,6 +237,10 @@ final class AppModel {
         stashMessage = ""
         changesSearch = ""
         historySearch = ""
+        isAmendingLastCommit = false
+        remotes = []
+        pendingBranchRename = nil
+        pendingBranchDelete = nil
         isLoading = true
         diffGeneration += 1
         detailGeneration += 1
@@ -503,10 +518,13 @@ final class AppModel {
 
     func commit() async {
         guard let repository = selectedRepository else { return }
+        let amending = isAmendingLastCommit
         let staged = stagedChanges
-        guard !staged.isEmpty else {
-            present(title: "Nothing staged", message: "Select the files you want to include in this commit.")
-            return
+        if !amending {
+            guard !staged.isEmpty else {
+                present(title: "Nothing staged", message: "Select the files you want to include in this commit.")
+                return
+            }
         }
 
         let summary = commitSummary.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -520,8 +538,12 @@ final class AppModel {
         let identity = settings.identity
         let count = staged.count
 
-        let succeeded = await withActivity("Committing…") { () -> Bool in
-            try await self.git.commit(message: message, at: repository.url, identity: identity)
+        let succeeded = await withActivity(amending ? "Amending…" : "Committing…") { () -> Bool in
+            if amending {
+                try await self.git.amendCommit(message: message, at: repository.url, identity: identity)
+            } else {
+                try await self.git.commit(message: message, at: repository.url, identity: identity)
+            }
             return true
         }
 
@@ -529,7 +551,58 @@ final class AppModel {
             commitSummary = ""
             commitDescription = ""
             isDescriptionExpanded = false
-            showToast("Committed \(count) change\(count == 1 ? "" : "s")")
+            isAmendingLastCommit = false
+            if amending {
+                showToast("Amended the last commit")
+            } else {
+                showToast("Committed \(count) change\(count == 1 ? "" : "s")")
+            }
+        }
+        await refresh(showSpinner: false)
+    }
+
+    // MARK: - Amending & undo
+
+    var canAmendLastCommit: Bool {
+        selectedRepository != nil && !isBusy && !commits.isEmpty
+    }
+
+    func beginAmendLastCommit() async {
+        guard let repository = selectedRepository, let latest = commits.first else { return }
+
+        let body: String
+        if let detail = commitDetail, detail.commit.sha == latest.sha {
+            body = detail.body
+        } else {
+            body = (try? await git.commitDetail(at: repository.url, commit: latest))?.body ?? ""
+        }
+
+        commitSummary = latest.subject
+        commitDescription = body
+        isDescriptionExpanded = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        isAmendingLastCommit = true
+        tab = .changes
+    }
+
+    func cancelAmendLastCommit() {
+        isAmendingLastCommit = false
+        commitSummary = ""
+        commitDescription = ""
+        isDescriptionExpanded = false
+    }
+
+    func undoLastCommit() async {
+        guard let repository = selectedRepository, !commits.isEmpty else { return }
+        let succeeded = await withActivity("Undoing last commit…") { () -> Bool in
+            try await self.git.undoLastCommit(at: repository.url)
+            return true
+        }
+        if succeeded == true {
+            isAmendingLastCommit = false
+            commitSummary = ""
+            commitDescription = ""
+            isDescriptionExpanded = false
+            showToast("Undid the last commit")
         }
         await refresh(showSpinner: false)
     }
@@ -585,6 +658,77 @@ final class AppModel {
         }
         if succeeded == true { showToast("Published “\(branch)”") }
         await refresh(showSpinner: false)
+    }
+
+    // MARK: - Remotes management
+
+    func loadRemotes() async {
+        guard let repository = selectedRepository else {
+            remotes = []
+            return
+        }
+        remotes = (try? await git.remotes(at: repository.url)) ?? []
+    }
+
+    @discardableResult
+    func addRemote(name rawName: String, url rawURL: String) async -> Bool {
+        guard let repository = selectedRepository else { return false }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !name.isEmpty, !url.isEmpty else {
+            present(title: "Remote details required", message: "Enter both a remote name and a URL.")
+            return false
+        }
+        guard !name.contains(" "), !name.contains("/") else {
+            present(title: "Invalid remote name", message: "Remote names can’t contain spaces or slashes.")
+            return false
+        }
+
+        let succeeded = await withActivity("Adding remote…") { () -> Bool in
+            try await self.git.addRemote(name: name, url: url, at: repository.url)
+            return true
+        }
+        if succeeded == true {
+            showToast("Added remote “\(name)”")
+            await loadRemotes()
+            await refresh(showSpinner: false)
+        }
+        return succeeded == true
+    }
+
+    @discardableResult
+    func updateRemoteURL(_ remote: GitRemote, url rawURL: String) async -> Bool {
+        guard let repository = selectedRepository else { return false }
+        let url = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else {
+            present(title: "URL required", message: "Enter a URL for this remote.")
+            return false
+        }
+
+        let succeeded = await withActivity("Updating remote…") { () -> Bool in
+            try await self.git.setRemoteURL(name: remote.name, url: url, at: repository.url)
+            return true
+        }
+        if succeeded == true {
+            showToast("Updated remote “\(remote.name)”")
+            await loadRemotes()
+            await refresh(showSpinner: false)
+        }
+        return succeeded == true
+    }
+
+    func removeRemote(_ remote: GitRemote) async {
+        guard let repository = selectedRepository else { return }
+        let succeeded = await withActivity("Removing remote…") { () -> Bool in
+            try await self.git.removeRemote(name: remote.name, at: repository.url)
+            return true
+        }
+        if succeeded == true {
+            showToast("Removed remote “\(remote.name)”")
+            await loadRemotes()
+            await refresh(showSpinner: false)
+        }
     }
 
     // MARK: - Branches
@@ -644,7 +788,85 @@ final class AppModel {
         return succeeded == true
     }
 
+    func merge(_ branch: BranchInfo) async {
+        guard let repository = selectedRepository, !branch.isCurrent, !branch.isRemote else { return }
+
+        let conflicted = await withActivity("Merging \(branch.name)…") { () -> Bool in
+            let clean = try await self.git.merge(
+                branch: branch.name,
+                at: repository.url,
+                identity: self.settings.identity
+            )
+            return !clean
+        }
+
+        if conflicted == true {
+            showToast("Merge has conflicts to resolve")
+            tab = .changes
+        } else if conflicted == false {
+            showToast("Merged “\(branch.name)”")
+        }
+        await refresh(showSpinner: false)
+    }
+
+    @discardableResult
+    func renameBranch(_ branch: BranchInfo, to rawName: String) async -> Bool {
+        guard let repository = selectedRepository, !branch.isRemote else { return false }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !name.isEmpty else {
+            present(title: "Name required", message: "Enter a new name for the branch.")
+            return false
+        }
+        guard name != branch.name else { return true }
+        guard !name.contains(" "), !name.hasPrefix("-"), !name.hasSuffix(".") else {
+            present(title: "Invalid branch name", message: "Branch names can't contain spaces or start/end with punctuation.")
+            return false
+        }
+
+        let succeeded = await withActivity("Renaming branch…") { () -> Bool in
+            try await self.git.renameBranch(from: branch.name, to: name, at: repository.url)
+            return true
+        }
+        if succeeded == true { showToast("Renamed “\(branch.name)” to “\(name)”") }
+        await refresh(showSpinner: false)
+        return succeeded == true
+    }
+
+    func deleteBranch(_ branch: BranchInfo) async {
+        guard let repository = selectedRepository, !branch.isCurrent, !branch.isRemote else { return }
+        let succeeded = await withActivity("Deleting branch…") { () -> Bool in
+            // The user already confirmed, so use the force flag: unmerged
+            // branches should still be deletable from the manager.
+            try await self.git.deleteBranch(branch.name, at: repository.url, force: true)
+            return true
+        }
+        if succeeded == true { showToast("Deleted “\(branch.name)”") }
+        await refresh(showSpinner: false)
+    }
+
     // MARK: - History actions
+
+    func cherryPick(_ commit: CommitInfo) async {
+        guard let repository = selectedRepository else { return }
+
+        let conflicted = await withActivity("Cherry-picking \(commit.shortSHA)…") { () -> Bool in
+            let clean = try await self.git.cherryPick(
+                commit: commit.sha,
+                at: repository.url,
+                identity: self.settings.identity
+            )
+            return !clean
+        }
+
+        if conflicted == true {
+            showToast("Cherry-pick has conflicts to resolve")
+            tab = .changes
+        } else if conflicted == false {
+            showToast("Cherry-picked \(commit.shortSHA)")
+        }
+        await refresh(showSpinner: false)
+    }
 
     func revert(_ commit: CommitInfo) async {
         guard let repository = selectedRepository else { return }

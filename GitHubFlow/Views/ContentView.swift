@@ -23,6 +23,10 @@ struct ContentView: View {
                 CreateRepositorySheet()
             case .newBranch:
                 NewBranchSheet()
+            case .manageBranches:
+                BranchManagerSheet()
+            case .manageRemotes:
+                RemotesSheet()
             }
         }
         .alert(
@@ -75,6 +79,17 @@ struct ContentView: View {
             }
         } message: { commit in
             Text("A new commit will undo “\(commit.subject)”.")
+        }
+        .confirmationDialog(
+            "Undo the last commit?",
+            isPresented: $model.pendingUndoLastCommit,
+            titleVisibility: .visible
+        ) {
+            Button("Undo Commit", role: .destructive) {
+                Task { await model.undoLastCommit() }
+            }
+        } message: {
+            Text("The commit will be removed, but its changes stay staged so you can edit and commit again.")
         }
         .confirmationDialog(
             "Drop this stash?",

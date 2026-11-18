@@ -227,11 +227,15 @@ struct CommitComposer: View {
         @Bindable var model = model
 
         VStack(alignment: .leading, spacing: 8) {
+            if model.isAmendingLastCommit {
+                amendBanner
+            }
+
             HStack(spacing: 8) {
                 InitialsAvatar(name: displayName, size: 26)
 
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("Commit to \(model.currentBranchName)")
+                    Text(model.isAmendingLastCommit ? "Amend last commit" : "Commit to \(model.currentBranchName)")
                         .font(.system(size: 11.5, weight: .semibold))
                         .lineLimit(1)
                     Text(stagedSummary)
@@ -315,6 +319,29 @@ struct CommitComposer: View {
         .background(Theme.surface.opacity(0.4))
     }
 
+    private var amendBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "pencil.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.accent)
+            Text("Editing the most recent commit")
+                .font(.system(size: 10.5, weight: .medium))
+            Spacer()
+            Button("Cancel") {
+                model.cancelAmendLastCommit()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(Theme.accent)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Theme.accent.opacity(0.1))
+        )
+    }
+
     private var fieldBackground: some View {
         RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(Theme.field)
@@ -327,11 +354,16 @@ struct CommitComposer: View {
 
     private var stagedSummary: String {
         let count = model.stagedChanges.count
-        if count == 0 { return "No files staged" }
+        if count == 0 {
+            return model.isAmendingLastCommit ? "Message only" : "No files staged"
+        }
         return "\(count) file\(count == 1 ? "" : "s") staged"
     }
 
     private var commitButtonTitle: String {
-        model.stagedChanges.isEmpty ? "Commit" : "Commit \(model.stagedChanges.count) file\(model.stagedChanges.count == 1 ? "" : "s")"
+        if model.isAmendingLastCommit { return "Amend Commit" }
+        return model.stagedChanges.isEmpty
+            ? "Commit"
+            : "Commit \(model.stagedChanges.count) file\(model.stagedChanges.count == 1 ? "" : "s")"
     }
 }

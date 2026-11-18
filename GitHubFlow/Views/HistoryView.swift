@@ -34,6 +34,20 @@ struct HistoryView: View {
                                 }
                                 .contextMenu {
                                     Button("Copy Commit SHA") { model.copySHA(commit) }
+                                    Button("Cherry-Pick Commit…") {
+                                        Task { await model.cherryPick(commit) }
+                                    }
+
+                                    if model.commits.first?.sha == commit.sha {
+                                        Divider()
+                                        Button("Amend Last Commit…") {
+                                            Task { await model.beginAmendLastCommit() }
+                                        }
+                                        Button("Undo Last Commit…") {
+                                            model.pendingUndoLastCommit = true
+                                        }
+                                    }
+
                                     Divider()
                                     Button("Revert Commit…") { model.pendingRevert = commit }
                                         .disabled(model.snapshot?.hasChanges == true)
@@ -236,6 +250,34 @@ private struct CommitDetailPane: View {
                 }
                 .buttonStyle(.plain)
                 .help("Copy full SHA")
+
+                Menu {
+                    Button("Cherry-Pick Commit…") {
+                        Task { await model.cherryPick(commit) }
+                    }
+
+                    if model.commits.first?.sha == commit.sha {
+                        Divider()
+                        Button("Amend Last Commit…") {
+                            Task { await model.beginAmendLastCommit() }
+                        }
+                        Button("Undo Last Commit…") {
+                            model.pendingUndoLastCommit = true
+                        }
+                    }
+
+                    Divider()
+                    Button("Revert Commit…") { model.pendingRevert = commit }
+                        .disabled(model.snapshot?.hasChanges == true)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Commit actions")
             }
         }
         .padding(.horizontal, 14)

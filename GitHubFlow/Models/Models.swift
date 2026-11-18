@@ -118,6 +118,15 @@ struct BranchInfo: Identifiable, Hashable, Sendable {
     }
 }
 
+// MARK: - Remotes
+
+struct GitRemote: Identifiable, Hashable, Sendable {
+    let name: String
+    let url: String
+
+    var id: String { name }
+}
+
 // MARK: - Commits
 
 struct CommitInfo: Identifiable, Hashable, Sendable {
