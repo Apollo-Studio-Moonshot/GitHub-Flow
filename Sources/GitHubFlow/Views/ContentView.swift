@@ -76,6 +76,20 @@ struct ContentView: View {
         } message: { commit in
             Text("A new commit will undo “\(commit.subject)”.")
         }
+        .confirmationDialog(
+            "Drop this stash?",
+            isPresented: Binding(
+                get: { model.pendingStashDrop != nil },
+                set: { if !$0 { model.pendingStashDrop = nil } }
+            ),
+            presenting: model.pendingStashDrop
+        ) { stash in
+            Button("Drop Stash", role: .destructive) {
+                Task { await model.dropStash(stash) }
+            }
+        } message: { stash in
+            Text("“\(stash.message)” will be permanently deleted.")
+        }
         .overlay(alignment: .bottom) {
             if let toast = model.toast {
                 ToastView(text: toast.text)

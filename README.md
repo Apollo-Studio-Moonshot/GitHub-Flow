@@ -34,6 +34,9 @@ no shell scripts, no hidden state. Everything you see comes from `git status`,
     and a diff viewer for the selected file.
   - Revert a commit (guarded by a confirmation dialog).
   - Instant search across subjects, authors, and SHAs.
+- **Stashes tab** — save tracked and untracked changes with an optional message,
+  browse saved stashes, apply or pop them, and permanently drop a stash with
+  confirmation.
 - **Branches** — switch local or remote branches (remote branches create a
   tracking branch), create a branch with or without switching to it.
 - **Sync** — fetch, pull, push, with ahead/behind badges and a one-click
@@ -119,6 +122,7 @@ Support/          Info.plist, generated AppIcon.icns
   Interactive terminal prompts are disabled so the app never hangs.
 - History loads the most recent 200 commits.
 - Staging is per file (no line-level partial staging).
+- Stash saves include untracked files by default.
 - GitHub-specific features (pull requests, issues, Actions) are intentionally
   out of scope; a repository without a remote won't show a *Publish* button —
   add a remote with `git remote add origin …` first.

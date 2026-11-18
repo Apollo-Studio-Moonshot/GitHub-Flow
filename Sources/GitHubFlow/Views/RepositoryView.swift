@@ -54,6 +54,8 @@ struct RepositoryView: View {
                 ChangesView()
             case .history:
                 HistoryView()
+            case .stashes:
+                StashesView()
             }
         }
     }
@@ -114,6 +116,15 @@ private struct SegmentButton: View {
 
                 if tab == .changes, !model.allChanges.isEmpty {
                     Text("\(model.allChanges.count)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(isSelected ? Theme.accent : .secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(isSelected ? Theme.accent.opacity(0.16) : Color.primary.opacity(0.08))
+                        )
+                } else if tab == .stashes, !model.stashes.isEmpty {
+                    Text("\(model.stashes.count)")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(isSelected ? Theme.accent : .secondary)
                         .padding(.horizontal, 4)

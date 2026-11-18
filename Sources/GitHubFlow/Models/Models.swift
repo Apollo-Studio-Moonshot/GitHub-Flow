@@ -153,6 +153,18 @@ struct CommitDetail: Sendable, Hashable {
     let files: [FileDiff]
 }
 
+// MARK: - Stashes
+
+struct StashInfo: Identifiable, Hashable, Sendable {
+    let reference: String
+    let sha: String
+    let message: String
+    let date: Date
+
+    var id: String { sha }
+    var shortSHA: String { String(sha.prefix(7)) }
+}
+
 // MARK: - Diff model
 
 struct DiffLine: Hashable, Sendable {
@@ -256,6 +268,7 @@ struct RepoSnapshot: Sendable, Equatable {
     var hasUpstream: Bool
     var changes: [FileChange]
     var branches: [BranchInfo]
+    var stashes: [StashInfo]
     var operation: RepoOperation?
 
     static let empty = RepoSnapshot(
@@ -270,6 +283,7 @@ struct RepoSnapshot: Sendable, Equatable {
         hasUpstream: false,
         changes: [],
         branches: [],
+        stashes: [],
         operation: nil
     )
 
