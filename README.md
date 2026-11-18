@@ -48,27 +48,32 @@ no shell scripts, no hidden state. Everything you see comes from `git status`,
 ## Requirements
 
 - macOS 14 or later
-- Xcode 16+ (or the matching Swift 6 toolchain)
+- Xcode 16 or later (the project uses Swift 6 language mode with complete
+  concurrency checking)
 - `git` available at `/usr/bin/git` or via Homebrew
 
 ## Build & run
 
+Open `GitHubFlow.xcodeproj` in Xcode, select the **GitHubFlow** scheme, and
+press Run. The scheme builds both the app and the `GitHubFlowTests` test bundle
+and is checked in under `xcshareddata`, so it is available to everyone.
+
+To build or test from the command line:
+
 ```sh
-# Build a real .app bundle (includes the icon and Info.plist)
+# Build the app
+xcodebuild -project GitHubFlow.xcodeproj -scheme GitHubFlow -configuration Debug build
+
+# Run the test suite (parsers + a live temporary repository)
+xcodebuild -project GitHubFlow.xcodeproj -scheme GitHubFlow test
+```
+
+To produce a distributable `.app` bundle (ad-hoc signed, includes the icon and
+Info.plist):
+
+```sh
 sh scripts/build-app.sh
 open .build/GitHubFlow.app
-```
-
-For quick development runs:
-
-```sh
-swift run
-```
-
-Run the test suite (parsers + a live temporary repository):
-
-```sh
-swift test
 ```
 
 Regenerate the app icon after tweaking `scripts/make-icon.swift`:
@@ -92,6 +97,8 @@ sh scripts/make-icon.sh
 ## Project layout
 
 ```
+GitHubFlow.xcodeproj/   Xcode project (shared GitHubFlow scheme)
+project.yml             XcodeGen spec used to regenerate the project file
 Sources/GitHubFlow/
   App/            App entry point, menu commands, AppKit delegate
   Core/           ProcessRunner, GitClient (actor), parsers for status/log/diff
@@ -103,6 +110,15 @@ Tests/GitHubFlowTests/
                   Parser unit tests + end-to-end GitClient tests
 scripts/          App bundle, icon generation
 Support/          Info.plist, generated AppIcon.icns
+```
+
+`GitHubFlow.xcodeproj` is generated from `project.yml` with
+[XcodeGen](https://github.com/yonaskolb/XcodeGen). The generated project is
+checked in, so XcodeGen is only needed if you add or remove files outside of
+Xcode and want to refresh the project:
+
+```sh
+xcodegen generate
 ```
 
 ### Concurrency model
