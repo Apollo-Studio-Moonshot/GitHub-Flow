@@ -260,12 +260,12 @@ private struct CommitDetailPane: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             if file.additions > 0 {
-                                Text("+\\(file.additions)")
+                                Text("+\(file.additions)")
                                     .font(.system(size: 8.5, design: .monospaced))
                                     .foregroundStyle(Theme.success)
                             }
                             if file.deletions > 0 {
-                                Text("−\\(file.deletions)")
+                                Text("−\(file.deletions)")
                                     .font(.system(size: 8.5, design: .monospaced))
                                     .foregroundStyle(Theme.danger)
                             }

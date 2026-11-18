@@ -162,11 +162,22 @@ actor GitClient {
 
     func commitDetail(at root: URL, commit: CommitInfo) async throws -> CommitDetail {
         let bodyResult = try await run(["show", "-s", "--pretty=format:%b", commit.sha], in: root)
-        let patchResult = try await run(
-            ["-c", "core.quotePath=false", "show", "--format=", "--patch", "--no-color", "--no-ext-diff", "-U3", commit.sha],
-            in: root,
-            allowFailure: true
-        )
+
+        // `git show` prints no patch for merge commits (it needs `-m`/`--cc`),
+        // so diff a merge against its first parent to get a regular patch.
+        let patchArguments: [String]
+        if commit.isMerge, let firstParent = commit.parents.first {
+            patchArguments = [
+                "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "-U3",
+                firstParent, commit.sha
+            ]
+        } else {
+            patchArguments = [
+                "-c", "core.quotePath=false", "show", "--format=", "--patch", "--no-color", "--no-ext-diff", "-U3", commit.sha
+            ]
+        }
+
+        let patchResult = try await run(patchArguments, in: root, allowFailure: true)
         let files = patchResult.succeeded ? DiffParser.parse(patchResult.stdout) : []
         let body = bodyResult.succeeded ? bodyResult.stdoutTrimmed : ""
         return CommitDetail(commit: commit, body: body, files: files)
@@ -183,9 +194,17 @@ actor GitClient {
             return parsed.map { $0.replacingPath(change.path) }
         }
 
-        let arguments = hasCommits
-            ? ["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3", "HEAD", "--"] + change.affectedPaths
-            : ["-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3", "--cached", "--"] + change.affectedPaths
+        // A staged change must be shown against HEAD, an unstaged change against
+        // the index. Otherwise a partially staged file would show the same
+        // combined diff for both of its rows.
+        var arguments = [
+            "-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "--find-renames", "-U3"
+        ]
+        if change.staged {
+            arguments.append("--cached")
+            if hasCommits { arguments.append("HEAD") }
+        }
+        arguments += ["--"] + change.affectedPaths
 
         let result = try await run(arguments, in: root, allowFailure: true)
         guard result.succeeded || result.exitCode == 1 else {
@@ -235,11 +254,15 @@ actor GitClient {
                     if FileManager.default.fileExists(atPath: fileURL.path) {
                         try? FileManager.default.removeItem(at: fileURL)
                     }
-                } else if hasCommits {
+                } else if hasCommits && (change.staged || change.isConflicted) {
                     _ = try await run(
                         ["restore", "--source=HEAD", "--staged", "--worktree", "--", path],
                         in: root
                     )
+                } else if hasCommits {
+                    // Only the working-tree side of a partly staged file: keep
+                    // whatever the user already staged in the index.
+                    _ = try await run(["restore", "--worktree", "--", path], in: root)
                 } else {
                     _ = try await run(
                         ["rm", "--cached", "-r", "--force", "--ignore-unmatch", "--", path],
@@ -377,25 +400,29 @@ actor GitClient {
         _ = try await run(["-c", "push.default=simple", "push"], in: root)
     }
 
-    func publish(branch: String, at root: URL) async throws {
-        _ = try await run(["push", "--set-upstream", "origin", branch], in: root)
+    func publish(branch: String, remote: String = "origin", at root: URL) async throws {
+        _ = try await run(["push", "--set-upstream", remote, branch], in: root)
     }
 
     // MARK: - Commits, cloning, creation
 
-    func revert(commit sha: String, at root: URL, identity: GitIdentity?) async throws {
+    func revert(commit sha: String, at root: URL, identity: GitIdentity?, isMerge: Bool = false) async throws {
         var environment: [String: String] = [:]
         if let identity {
-            environment["GIT_AUTHOR_NAME"] = identity.name
-            environment["GIT_COMMITTER_NAME"] = identity.name
-            environment["GIT_AUTHOR_EMAIL"] = identity.email
-            environment["GIT_COMMITTER_EMAIL"] = identity.email
+            if !identity.name.isEmpty {
+                environment["GIT_AUTHOR_NAME"] = identity.name
+                environment["GIT_COMMITTER_NAME"] = identity.name
+            }
+            if !identity.email.isEmpty {
+                environment["GIT_AUTHOR_EMAIL"] = identity.email
+                environment["GIT_COMMITTER_EMAIL"] = identity.email
+            }
         }
-        _ = try await run(
-            ["-c", "commit.gpgsign=false", "revert", "--no-edit", sha],
-            in: root,
-            extraEnvironment: environment
-        )
+        // Reverting a merge needs to know which parent is the mainline.
+        var arguments = ["-c", "commit.gpgsign=false", "revert", "--no-edit"]
+        if isMerge { arguments += ["-m", "1"] }
+        arguments.append(sha)
+        _ = try await run(arguments, in: root, extraEnvironment: environment)
     }
 
     func clone(remote: String, to destination: URL) async throws {

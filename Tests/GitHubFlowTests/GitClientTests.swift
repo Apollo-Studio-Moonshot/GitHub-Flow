@@ -128,6 +128,117 @@ final class GitClientTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: repoURL.appendingPathComponent("added.txt").path))
     }
 
+    func testWorkingDiffSeparatesStagedAndUnstagedChanges() async throws {
+        let client = GitClient()
+
+        try write("one\ntwo\nthree\n", to: "file.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Initial"])
+
+        try write("one\nTWO\nthree\n", to: "file.txt")
+        try git(["add", "file.txt"])
+        try write("one\nTWO\nTHREE\n", to: "file.txt")
+
+        let snapshot = try await client.snapshot(at: repoURL)
+        let staged = try XCTUnwrap(snapshot.stagedChanges.first { $0.path == "file.txt" })
+        let unstaged = try XCTUnwrap(snapshot.unstagedChanges.first { $0.path == "file.txt" })
+
+        let stagedDiffs = try await client.workingDiff(at: repoURL, change: staged, hasCommits: true)
+        let unstagedDiffs = try await client.workingDiff(at: repoURL, change: unstaged, hasCommits: true)
+        let stagedDiff = try XCTUnwrap(stagedDiffs.first)
+        let unstagedDiff = try XCTUnwrap(unstagedDiffs.first)
+
+        let stagedText = stagedDiff.hunks.flatMap(\.lines).map(\.text).joined(separator: "\n")
+        let unstagedText = unstagedDiff.hunks.flatMap(\.lines).map(\.text).joined(separator: "\n")
+        let unstagedAdditions = unstagedDiff.hunks.flatMap(\.lines).filter { $0.kind == .addition }.map(\.text)
+        let unstagedDeletions = unstagedDiff.hunks.flatMap(\.lines).filter { $0.kind == .deletion }.map(\.text)
+
+        XCTAssertEqual(stagedDiff.additions, 1)
+        XCTAssertEqual(stagedDiff.deletions, 1)
+        XCTAssertTrue(stagedText.contains("TWO"))
+        XCTAssertFalse(stagedText.contains("THREE"))
+
+        XCTAssertEqual(unstagedDiff.additions, 1)
+        XCTAssertEqual(unstagedDiff.deletions, 1)
+        XCTAssertTrue(unstagedText.contains("THREE"))
+        XCTAssertEqual(unstagedAdditions, ["THREE"])
+        XCTAssertEqual(unstagedDeletions, ["three"])
+    }
+
+    func testDiscardUnstagedChangeKeepsStagedChange() async throws {
+        let client = GitClient()
+
+        try write("a\n", to: "file.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Initial"])
+
+        try write("staged\n", to: "file.txt")
+        try git(["add", "file.txt"])
+        try write("unstaged\n", to: "file.txt")
+
+        var snapshot = try await client.snapshot(at: repoURL)
+        let unstaged = try XCTUnwrap(snapshot.unstagedChanges.first { $0.path == "file.txt" })
+
+        try await client.discard(changes: [unstaged], at: repoURL, hasCommits: true)
+
+        snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertEqual(snapshot.stagedChanges.count, 1)
+        XCTAssertTrue(snapshot.unstagedChanges.isEmpty)
+        XCTAssertEqual(
+            try String(contentsOf: repoURL.appendingPathComponent("file.txt"), encoding: .utf8),
+            "staged\n"
+        )
+    }
+
+    func testMergeCommitDetailIncludesFiles() async throws {
+        let client = GitClient()
+
+        try write("base\n", to: "base.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Base"])
+
+        try git(["checkout", "-q", "-b", "feature"])
+        try write("feature\n", to: "feature.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Feature"])
+
+        try git(["checkout", "-q", "main"])
+        try write("main\n", to: "main.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Main"])
+
+        try git(["merge", "-q", "--no-ff", "-m", "Merge feature", "feature"])
+
+        let history = try await client.history(at: repoURL)
+        let mergeCommit = try XCTUnwrap(history.first)
+        XCTAssertTrue(mergeCommit.isMerge)
+
+        let detail = try await client.commitDetail(at: repoURL, commit: mergeCommit)
+        XCTAssertEqual(detail.files.map(\.path), ["feature.txt"])
+    }
+
+    func testPublishToNonOriginRemote() async throws {
+        let client = GitClient()
+        let bareURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("githubflow-remote-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: bareURL) }
+
+        try runGit(["init", "-q", "--bare", bareURL.path], in: FileManager.default.temporaryDirectory)
+
+        try write("a\n", to: "file.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Initial"])
+        try git(["remote", "add", "upstream", bareURL.path])
+
+        try await client.publish(branch: "main", remote: "upstream", at: repoURL)
+
+        let output = try runGit(
+            ["--git-dir", bareURL.path, "rev-parse", "--verify", "refs/heads/main"],
+            in: FileManager.default.temporaryDirectory
+        )
+        XCTAssertFalse(output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
     func testEmptyRepositorySnapshot() async throws {
         let client = GitClient()
         let snapshot = try await client.snapshot(at: repoURL)
@@ -224,18 +335,26 @@ final class GitClientTests: XCTestCase {
     }
 
     private func git(_ arguments: [String]) throws {
+        _ = try runGit(arguments, in: repoURL)
+    }
+
+    @discardableResult
+    private func runGit(_ arguments: [String], in directory: URL) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = arguments
-        process.currentDirectoryURL = repoURL
+        process.currentDirectoryURL = directory
         let stderr = Pipe()
+        let stdout = Pipe()
         process.standardError = stderr
-        process.standardOutput = Pipe()
+        process.standardOutput = stdout
         try process.run()
         process.waitUntilExit()
         if process.terminationStatus != 0 {
             let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             XCTFail("git \(arguments.joined(separator: " ")) failed: \(message)")
         }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }

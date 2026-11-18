@@ -270,7 +270,13 @@ final class AppModel {
 
         guard let newSnapshot = try? await git.snapshot(at: repository.url) else { return }
         guard selectedRepository?.id == repository.id else { return }
-        guard newSnapshot != snapshot else { return }
+        guard newSnapshot != snapshot else {
+            // The status can be identical while a file's *contents* changed
+            // (e.g. an external editor saved an already-modified file), so keep
+            // the visible diff in sync too.
+            if tab == .changes, selectedChange != nil { await loadWorkingDiff() }
+            return
+        }
 
         let newHistory = (try? await git.history(at: repository.url)) ?? commits
         guard selectedRepository?.id == repository.id else { return }
@@ -566,10 +572,15 @@ final class AppModel {
     }
 
     func publishBranch() async {
-        guard let repository = selectedRepository, let snapshot, !snapshot.branch.isEmpty else { return }
+        guard let repository = selectedRepository,
+              let snapshot,
+              snapshot.hasCommits,
+              !snapshot.branch.isEmpty,
+              snapshot.hasRemote else { return }
         let branch = snapshot.branch
+        let remote = snapshot.remoteOrDefaultName
         let succeeded = await withActivity("Publishing…") { () -> Bool in
-            try await self.git.publish(branch: branch, at: repository.url)
+            try await self.git.publish(branch: branch, remote: remote, at: repository.url)
             return true
         }
         if succeeded == true { showToast("Published “\(branch)”") }
@@ -581,8 +592,17 @@ final class AppModel {
     func switchBranch(_ branch: BranchInfo) async {
         guard let repository = selectedRepository, !branch.isCurrent else { return }
 
+        // Prefer an existing local branch when the user picks a remote one,
+        // otherwise `--track -c` would fail for an already-existing name.
+        let localMatch = branch.isRemote
+            ? snapshot?.localBranches.first { $0.name == branch.displayName }
+            : nil
+        if let localMatch, localMatch.isCurrent { return }
+
         let succeeded = await withActivity("Switching to \(branch.displayName)…") { () -> Bool in
-            if branch.isRemote {
+            if let localMatch {
+                try await self.git.checkout(branch: localMatch.name, at: repository.url)
+            } else if branch.isRemote {
                 try await self.git.checkoutRemote(
                     fullName: branch.name,
                     localName: branch.displayName,
@@ -630,7 +650,12 @@ final class AppModel {
         guard let repository = selectedRepository else { return }
         let identity = settings.identity
         let succeeded = await withActivity("Reverting \(commit.shortSHA)…") { () -> Bool in
-            try await self.git.revert(commit: commit.sha, at: repository.url, identity: identity)
+            try await self.git.revert(
+                commit: commit.sha,
+                at: repository.url,
+                identity: identity,
+                isMerge: commit.isMerge
+            )
             return true
         }
         if succeeded == true { showToast("Reverted “\(commit.subject)”") }

@@ -49,7 +49,7 @@ struct ContentView: View {
                 Task { await model.discard(change) }
             }
         } message: { change in
-            Text("“\(change.path)” will be restored to its last committed state. This can’t be undone.")
+            Text("Uncommitted changes to “\(change.path)” will be permanently discarded. This can’t be undone.")
         }
         .confirmationDialog(
             "Discard all changes?",

@@ -214,6 +214,7 @@ struct RepositoryHeader: View {
             syncControls
 
             if let snapshot = model.snapshot,
+               snapshot.hasCommits,
                !snapshot.hasUpstream,
                snapshot.hasRemote,
                !snapshot.branch.isEmpty {
