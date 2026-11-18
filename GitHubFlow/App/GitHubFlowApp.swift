@@ -28,6 +28,11 @@ struct GitHubFlowApp: App {
 
                 Button("New Repository…") { model.sheet = .create }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("Command Palette…") { model.showsCommandPalette = true }
+                    .keyboardShortcut("k", modifiers: .command)
             }
 
             CommandMenu("Repository") {
@@ -65,6 +70,18 @@ struct GitHubFlowApp: App {
 
                 Button("Push") { Task { await model.push() } }
                     .keyboardShortcut("p", modifiers: [.command, .option])
+
+                Divider()
+
+                Button("Standup Digest…") { model.sheet = .standup }
+
+                Button("Repository Janitor…") { model.sheet = .janitor }
+                    .disabled(model.selectedRepository == nil)
+
+                Button("Capture Safety Snapshot") {
+                    Task { await model.captureSnapshot() }
+                }
+                .disabled(model.selectedRepository == nil)
             }
         }
 

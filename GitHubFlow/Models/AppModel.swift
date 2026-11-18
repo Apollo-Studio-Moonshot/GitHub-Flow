@@ -15,23 +15,29 @@ struct ToastMessage: Identifiable, Equatable {
 
 enum MainTab: String, CaseIterable, Identifiable, Hashable {
     case changes
+    case flow
     case history
     case stashes
+    case safety
 
     var id: String { rawValue }
     var title: String {
         switch self {
         case .changes: "Changes"
+        case .flow: "Flow"
         case .history: "History"
         case .stashes: "Stashes"
+        case .safety: "Safety"
         }
     }
 
     var symbol: String {
         switch self {
         case .changes: "square.stack.3d.up"
+        case .flow: "point.3.connected.trianglepath.dotted"
         case .history: "clock.arrow.circlepath"
         case .stashes: "archivebox"
+        case .safety: "shield.lefthalf.filled"
         }
     }
 }
@@ -42,6 +48,8 @@ enum SheetRoute: String, Identifiable, Hashable {
     case newBranch
     case manageBranches
     case manageRemotes
+    case standup
+    case janitor
 
     var id: String { rawValue }
 }
@@ -130,10 +138,49 @@ final class AppModel {
 
     private(set) var remotes: [GitRemote] = []
 
+    // MARK: - Flow Center
+
+    private(set) var flowSummary: FlowSummary?
+    private(set) var isLoadingFlow = false
+    var flowBase: String?
+
+    // MARK: - Safety Net
+
+    private(set) var recoverySnapshots: [RecoverySnapshot] = []
+    var pendingSnapshotRestore: RecoverySnapshot?
+    var pendingSnapshotDelete: RecoverySnapshot?
+
+    // MARK: - Standup
+
+    private(set) var standup: StandupDigest?
+    private(set) var isLoadingStandup = false
+    var standupRange: StandupRange = .today
+
+    // MARK: - Repository janitor
+
+    private(set) var staleBranches: [StaleBranch] = []
+    private(set) var largeObjects: [LargeObject] = []
+    private(set) var ignoreSuggestions: [GitignoreSuggestion] = []
+    private(set) var isScanningJanitor = false
+    private(set) var hasScannedLargeObjects = false
+
+    // MARK: - Command palette & explanations
+
+    var showsCommandPalette = false
+    var showsExplanation = false
+    private(set) var explanation: ChangeExplanation?
+    private(set) var isExplaining = false
+    private var explanationPrompt: String?
+
     // MARK: - Generation tokens
 
     private var diffGeneration = 0
     private var detailGeneration = 0
+    private var flowGeneration = 0
+    private var flowHeadSHA: String?
+    private var flowWorktreeSignature: String?
+    private var standupGeneration = 0
+    private var janitorGeneration = 0
 
     // MARK: - Init
 
@@ -239,11 +286,27 @@ final class AppModel {
         historySearch = ""
         isAmendingLastCommit = false
         remotes = []
+        flowSummary = nil
+        flowBase = nil
+        flowHeadSHA = nil
+        flowWorktreeSignature = nil
+        recoverySnapshots = []
+        pendingSnapshotRestore = nil
+        pendingSnapshotDelete = nil
+        staleBranches = []
+        largeObjects = []
+        ignoreSuggestions = []
+        hasScannedLargeObjects = false
+        explanation = nil
+        explanationPrompt = nil
+        showsExplanation = false
         pendingBranchRename = nil
         pendingBranchDelete = nil
         isLoading = true
         diffGeneration += 1
         detailGeneration += 1
+        flowGeneration += 1
+        janitorGeneration += 1
     }
 
     /// Called when the selected repository's view appears or the selection changes.
@@ -254,6 +317,7 @@ final class AppModel {
             resetRepositoryState()
         }
         await refresh()
+        await loadSnapshots()
     }
 
     // MARK: - Loading
@@ -269,6 +333,7 @@ final class AppModel {
             let newHistory = try await git.history(at: url)
             guard selectedRepository?.id == repository.id else { return }
             apply(snapshot: newSnapshot, history: newHistory)
+            if tab == .flow { await loadFlow(force: true) }
         } catch {
             guard selectedRepository?.id == repository.id else { return }
             // A repository that moved on disk is reported inline in the UI;
@@ -387,6 +452,429 @@ final class AppModel {
         }
     }
 
+    // MARK: - Flow Center
+
+    var flowBaseOptions: [String] {
+        guard let snapshot else { return [] }
+        return snapshot.branches
+            .filter { !$0.isCurrent }
+            .map(\.name)
+            .sorted { lhs, rhs in
+                let preferred = ["origin/main", "origin/master", "origin/develop", "main", "master", "develop", "trunk"]
+                let lhsRank = preferred.firstIndex(of: lhs) ?? preferred.count
+                let rhsRank = preferred.firstIndex(of: rhs) ?? preferred.count
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                return lhs.localizedStandardCompare(rhs) == .orderedAscending
+            }
+    }
+
+    func setFlowBase(_ base: String?) {
+        flowBase = base
+        flowSummary = nil
+        flowHeadSHA = nil
+        flowWorktreeSignature = nil
+    }
+
+    func loadFlow(force: Bool = false) async {
+        guard let repository = selectedRepository else {
+            flowSummary = nil
+            return
+        }
+        let headSHA = commits.first?.sha
+        let worktree = worktreeSignature
+        if !force,
+           flowSummary != nil,
+           flowSummary?.branch == snapshot?.branch,
+           flowHeadSHA == headSHA,
+           flowWorktreeSignature == worktree {
+            return
+        }
+
+        flowGeneration += 1
+        let generation = flowGeneration
+        isLoadingFlow = true
+        defer { if generation == flowGeneration { isLoadingFlow = false } }
+
+        do {
+            let summary = try await git.flowSummary(at: repository.url, base: flowBase)
+            guard generation == flowGeneration else { return }
+            flowSummary = summary
+            flowHeadSHA = headSHA
+            flowWorktreeSignature = worktree
+        } catch {
+            guard generation == flowGeneration else { return }
+            flowSummary = nil
+            present(error)
+        }
+    }
+
+    private var worktreeSignature: String {
+        (snapshot?.changes ?? []).map(\.id).sorted().joined(separator: "|")
+    }
+
+    func openFlowCompare() {
+        guard let link = flowSummary?.compareURL, let url = URL(string: link) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func copyFlowPRBody() {
+        guard let summary = flowSummary else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(summary.prBody, forType: .string)
+        showToast("Copied pull request description")
+    }
+
+    func explainBranch() async {
+        guard let summary = flowSummary else { return }
+        let files = summary.groups.flatMap(\.files)
+        explanation = ChangeExplainer.explain(
+            title: "This branch",
+            subjects: summary.commitSubjects,
+            files: files
+        )
+        explanationPrompt = ChangeExplainer.prompt(
+            title: "Branch \(summary.branch) vs \(summary.base ?? "base")",
+            subjects: summary.commitSubjects,
+            files: files,
+            diff: nil
+        )
+        showsExplanation = true
+    }
+
+    func explainSelectedCommit() async {
+        guard let commit = selectedCommit else { return }
+        isExplaining = true
+        defer { isExplaining = false }
+
+        if commitDetail == nil || commitDetail?.commit.sha != commit.sha {
+            await loadCommitDetail()
+        }
+        guard let detail = commitDetail, detail.commit.sha == commit.sha else {
+            present(title: "Couldn’t load commit", message: "The commit details are not available right now.")
+            return
+        }
+
+        let files = detail.files.map {
+            FlowAnalyzer.impactFile(
+                path: $0.path,
+                additions: $0.additions,
+                deletions: $0.deletions,
+                isBinary: $0.isBinary
+            )
+        }
+        explanation = ChangeExplainer.explain(
+            title: commit.subject,
+            subjects: [commit.subject],
+            files: files
+        )
+        explanationPrompt = ChangeExplainer.prompt(
+            title: commit.subject,
+            subjects: [commit.subject],
+            files: files,
+            diff: Self.diffExcerpt(detail.files)
+        )
+        showsExplanation = true
+    }
+
+    func refineExplanationWithOnDevice() async {
+        guard let prompt = explanationPrompt else { return }
+        isExplaining = true
+        defer { isExplaining = false }
+
+        if let text = await OnDeviceExplainer.explain(prompt: prompt) {
+            explanation = ChangeExplanation(
+                title: explanation?.title ?? "Explanation",
+                text: text,
+                source: .onDevice
+            )
+            showToast("Refined with the on-device model")
+        } else {
+            present(
+                title: "On-device model unavailable",
+                message: "This Mac can’t run the system language model, or the model isn’t ready yet."
+            )
+        }
+    }
+
+    private static func diffExcerpt(_ files: [FileDiff]) -> String {
+        files.prefix(10).map { file in
+            var lines = ["--- \(file.path)"]
+            for hunk in file.hunks {
+                lines.append(hunk.header)
+                lines.append(contentsOf: hunk.lines.map { line in
+                    switch line.kind {
+                    case .addition: "+" + line.text
+                    case .deletion: "-" + line.text
+                    case .context: " " + line.text
+                    case .meta: line.text
+                    }
+                })
+            }
+            return lines.joined(separator: "\n")
+        }
+        .joined(separator: "\n\n")
+    }
+
+    // MARK: - Safety Net
+
+    func loadSnapshots() async {
+        guard let repository = selectedRepository else {
+            recoverySnapshots = []
+            return
+        }
+        recoverySnapshots = (try? await git.recoverySnapshots(at: repository.url)) ?? []
+    }
+
+    func captureSnapshot(label: String = "Manual snapshot") async {
+        guard let repository = selectedRepository else { return }
+        let succeeded = await withActivity("Capturing snapshot…") { () -> Bool in
+            _ = try await self.git.createWorktreeSnapshot(
+                label: label,
+                at: repository.url,
+                hasCommits: self.snapshot?.hasCommits ?? false,
+                identity: self.settings.identity
+            )
+            return true
+        }
+        if succeeded == true {
+            await loadSnapshots()
+            showToast("Captured a safety snapshot")
+        }
+    }
+
+    func restoreSnapshot(_ snapshot: RecoverySnapshot) async {
+        guard let repository = selectedRepository else { return }
+
+        // Make even a restore reversible by capturing the current state first.
+        if snapshot.kind != .commit, self.snapshot?.hasChanges == true {
+            _ = try? await git.createWorktreeSnapshot(
+                label: "Before restoring a snapshot",
+                at: repository.url,
+                hasCommits: self.snapshot?.hasCommits ?? false,
+                identity: settings.identity
+            )
+        }
+
+        let succeeded = await withActivity("Restoring snapshot…") { () -> Bool in
+            switch snapshot.kind {
+            case .workingTree:
+                try await self.git.restoreWorktreeSnapshot(sha: snapshot.sha, at: repository.url)
+            case .commit:
+                try await self.git.restoreCommitSnapshot(sha: snapshot.sha, at: repository.url)
+            case .branch:
+                guard let name = snapshot.branchName else {
+                    throw GitError.invalidInput("This snapshot doesn’t name a branch.")
+                }
+                try await self.git.restoreBranchSnapshot(name: name, sha: snapshot.sha, at: repository.url)
+            }
+            return true
+        }
+
+        if succeeded == true {
+            showToast("Restored snapshot")
+            await loadSnapshots()
+            await refresh(showSpinner: false)
+        }
+    }
+
+    func deleteSnapshot(_ snapshot: RecoverySnapshot) async {
+        guard let repository = selectedRepository else { return }
+        let succeeded = await withActivity("Deleting snapshot…") { () -> Bool in
+            try await self.git.deleteSnapshot(ref: snapshot.ref, at: repository.url)
+            return true
+        }
+        if succeeded == true {
+            await loadSnapshots()
+            showToast("Deleted snapshot")
+        }
+    }
+
+    private func captureWorkingTreeBefore(_ label: String) async {
+        guard let repository = selectedRepository, snapshot?.hasChanges == true else { return }
+        _ = try? await git.createWorktreeSnapshot(
+            label: label,
+            at: repository.url,
+            hasCommits: snapshot?.hasCommits ?? false,
+            identity: settings.identity
+        )
+        await loadSnapshots()
+    }
+
+    private func captureCommitBefore() async {
+        guard let repository = selectedRepository, snapshot?.hasCommits == true else { return }
+        _ = try? await git.createCommitSnapshot(at: repository.url)
+        await loadSnapshots()
+    }
+
+    private func captureBranchBefore(_ branch: BranchInfo) async {
+        guard let repository = selectedRepository else { return }
+        _ = try? await git.createBranchSnapshot(
+            branch: branch.name,
+            at: repository.url,
+            identity: settings.identity
+        )
+        await loadSnapshots()
+    }
+
+    // MARK: - Standup digest
+
+    func loadStandup(range: StandupRange? = nil) async {
+        let selectedRange = range ?? standupRange
+        standupRange = selectedRange
+
+        standupGeneration += 1
+        let generation = standupGeneration
+        isLoadingStandup = true
+        defer { if generation == standupGeneration { isLoadingStandup = false } }
+
+        let calendar = Calendar.current
+        let since: Date
+        switch selectedRange {
+        case .today:
+            since = calendar.startOfDay(for: Date())
+        case .week:
+            since = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: Date())) ?? Date()
+        }
+
+        let author = settings.identity?.email
+        var commits: [StandupCommit] = []
+        for repository in repositories where repository.existsOnDisk {
+            let recent = (try? await git.recentCommits(at: repository.url, since: since, author: author)) ?? []
+            for commit in recent {
+                commits.append(
+                    StandupCommit(
+                        sha: commit.sha,
+                        shortSHA: commit.shortSHA,
+                        repository: repository.name,
+                        author: commit.author,
+                        subject: commit.subject,
+                        date: commit.date
+                    )
+                )
+            }
+        }
+
+        guard generation == standupGeneration else { return }
+        commits.sort { $0.date > $1.date }
+        let markdown = Self.standupMarkdown(range: selectedRange, commits: commits)
+        standup = StandupDigest(
+            range: selectedRange,
+            generatedAt: .now,
+            commits: commits,
+            markdown: markdown
+        )
+    }
+
+    func copyStandup() {
+        guard let markdown = standup?.markdown else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(markdown, forType: .string)
+        showToast("Copied standup digest")
+    }
+
+    private static func standupMarkdown(range: StandupRange, commits: [StandupCommit]) -> String {
+        var lines: [String] = [
+            "# Standup — \(range.title)",
+            "",
+            "_Generated \(Date().formatted(date: .abbreviated, time: .shortened))_",
+            ""
+        ]
+
+        guard !commits.isEmpty else {
+            lines.append("No commits in this range.")
+            return lines.joined(separator: "\n")
+        }
+
+        let grouped = Dictionary(grouping: commits, by: \.repository)
+        for repository in grouped.keys.sorted() {
+            lines.append("## \(repository)")
+            for commit in grouped[repository] ?? [] {
+                lines.append(
+                    "- \(commit.subject) (`\(commit.shortSHA)`) — \(commit.author), \(commit.date.relativeDescription)"
+                )
+            }
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Repository janitor
+
+    func loadJanitor() async {
+        guard let repository = selectedRepository else {
+            resetJanitor()
+            return
+        }
+
+        janitorGeneration += 1
+        let generation = janitorGeneration
+        isScanningJanitor = true
+        defer { if generation == janitorGeneration { isScanningJanitor = false } }
+
+        let base = flowSummary?.base ?? snapshot?.currentBranch?.name
+        let branches = (try? await git.staleBranches(at: repository.url, base: base)) ?? []
+        let ignores = (try? await git.ignoreSuggestions(at: repository.url)) ?? []
+
+        guard generation == janitorGeneration else { return }
+        staleBranches = branches
+        ignoreSuggestions = ignores
+    }
+
+    func scanLargeObjects() async {
+        guard let repository = selectedRepository else { return }
+        janitorGeneration += 1
+        let generation = janitorGeneration
+        isScanningJanitor = true
+        defer { if generation == janitorGeneration { isScanningJanitor = false } }
+
+        let objects = (try? await git.largeObjects(at: repository.url)) ?? []
+        guard generation == janitorGeneration else { return }
+        largeObjects = objects
+        hasScannedLargeObjects = true
+    }
+
+    func deleteStaleBranches(_ branches: [StaleBranch]) async {
+        guard let repository = selectedRepository, !branches.isEmpty else { return }
+        let succeeded = await withActivity("Deleting branches…") { () -> Bool in
+            for branch in branches {
+                _ = try? await self.git.createBranchSnapshot(
+                    branch: branch.name,
+                    at: repository.url,
+                    identity: self.settings.identity
+                )
+                try await self.git.deleteBranch(branch.name, at: repository.url, force: true)
+            }
+            return true
+        }
+        if succeeded == true {
+            showToast("Deleted \(branches.count) branch\(branches.count == 1 ? "" : "es")")
+            await loadJanitor()
+            await refresh(showSpinner: false)
+        }
+    }
+
+    func applyIgnoreSuggestions(_ suggestions: [GitignoreSuggestion]) async {
+        guard let repository = selectedRepository, !suggestions.isEmpty else { return }
+        let succeeded = await withActivity("Updating .gitignore…") { () -> Bool in
+            try await self.git.appendGitignore(suggestions.map(\.pattern), at: repository.url)
+            return true
+        }
+        if succeeded == true {
+            showToast("Updated .gitignore")
+            await loadJanitor()
+            await refresh(showSpinner: false)
+        }
+    }
+
+    private func resetJanitor() {
+        staleBranches = []
+        largeObjects = []
+        ignoreSuggestions = []
+        hasScannedLargeObjects = false
+        isScanningJanitor = false
+        janitorGeneration += 1
+    }
+
     // MARK: - Staging
 
     func toggleStaging(_ change: FileChange) async {
@@ -434,6 +922,7 @@ final class AppModel {
 
     func discard(_ change: FileChange) async {
         guard let repository = selectedRepository else { return }
+        await captureWorkingTreeBefore("Before discarding \(change.displayName)")
 
         await withActivity("Discarding changes…") {
             try await self.git.discard(
@@ -449,6 +938,7 @@ final class AppModel {
         guard let repository = selectedRepository else { return }
         let changes = allChanges
         guard !changes.isEmpty else { return }
+        await captureWorkingTreeBefore("Before discarding all changes")
 
         await withActivity("Discarding all changes…") {
             try await self.git.discard(
@@ -569,6 +1059,7 @@ final class AppModel {
 
     func beginAmendLastCommit() async {
         guard let repository = selectedRepository, let latest = commits.first else { return }
+        await captureCommitBefore()
 
         let body: String
         if let detail = commitDetail, detail.commit.sha == latest.sha {
@@ -593,6 +1084,7 @@ final class AppModel {
 
     func undoLastCommit() async {
         guard let repository = selectedRepository, !commits.isEmpty else { return }
+        await captureCommitBefore()
         let succeeded = await withActivity("Undoing last commit…") { () -> Bool in
             try await self.git.undoLastCommit(at: repository.url)
             return true
@@ -790,6 +1282,7 @@ final class AppModel {
 
     func merge(_ branch: BranchInfo) async {
         guard let repository = selectedRepository, !branch.isCurrent, !branch.isRemote else { return }
+        await captureWorkingTreeBefore("Before merging \(branch.name)")
 
         let conflicted = await withActivity("Merging \(branch.name)…") { () -> Bool in
             let clean = try await self.git.merge(
@@ -835,6 +1328,7 @@ final class AppModel {
 
     func deleteBranch(_ branch: BranchInfo) async {
         guard let repository = selectedRepository, !branch.isCurrent, !branch.isRemote else { return }
+        await captureBranchBefore(branch)
         let succeeded = await withActivity("Deleting branch…") { () -> Bool in
             // The user already confirmed, so use the force flag: unmerged
             // branches should still be deletable from the manager.
@@ -849,6 +1343,7 @@ final class AppModel {
 
     func cherryPick(_ commit: CommitInfo) async {
         guard let repository = selectedRepository else { return }
+        await captureWorkingTreeBefore("Before cherry-picking \(commit.shortSHA)")
 
         let conflicted = await withActivity("Cherry-picking \(commit.shortSHA)…") { () -> Bool in
             let clean = try await self.git.cherryPick(
@@ -870,6 +1365,7 @@ final class AppModel {
 
     func revert(_ commit: CommitInfo) async {
         guard let repository = selectedRepository else { return }
+        await captureCommitBefore()
         let identity = settings.identity
         let succeeded = await withActivity("Reverting \(commit.shortSHA)…") { () -> Bool in
             try await self.git.revert(

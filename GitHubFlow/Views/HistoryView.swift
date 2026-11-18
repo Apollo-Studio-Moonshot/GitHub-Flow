@@ -34,6 +34,10 @@ struct HistoryView: View {
                                 }
                                 .contextMenu {
                                     Button("Copy Commit SHA") { model.copySHA(commit) }
+                                    Button("Explain Commit…") {
+                                        model.selectedCommitSHA = commit.sha
+                                        Task { await model.explainSelectedCommit() }
+                                    }
                                     Button("Cherry-Pick Commit…") {
                                         Task { await model.cherryPick(commit) }
                                     }
@@ -250,6 +254,14 @@ private struct CommitDetailPane: View {
                 }
                 .buttonStyle(.plain)
                 .help("Copy full SHA")
+
+                IconButton(
+                    systemName: "text.bubble",
+                    help: "Explain this commit",
+                    isEnabled: !model.isExplaining
+                ) {
+                    Task { await model.explainSelectedCommit() }
+                }
 
                 Menu {
                     Button("Cherry-Pick Commit…") {

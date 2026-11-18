@@ -12,6 +12,31 @@ no shell scripts, no hidden state. Everything you see comes from `git status`,
 
 ![GitHub Flow history](docs/screenshot-history.png)
 
+## What makes it different
+
+- **Flow Center** — a dedicated tab that treats the branch as a unit of work.
+  It scores readiness against a base branch, checks commits ahead/behind,
+  drift, conflict risk (via a trial merge), branch age, review size, and
+  uncommitted work. The impact map groups changed files into code, tests,
+  docs, config, dependencies, migrations, CI, and assets, and flags secrets,
+  large diffs, and binary changes. It also generates a copy-ready pull request
+  title and description, plus an *Open Pull Request Page* link derived from the
+  remote URL (no GitHub account or API token required).
+- **Safety Net** — destructive actions become reversible. Before a discard,
+  undo, amend, revert, merge, cherry-pick, or branch delete, the app captures a
+  hidden snapshot under `refs/githubflow/…`. The Safety tab lists snapshots
+  with a one-click restore, and restoring is itself snapshotted first.
+- **Command palette** — `⌘K` opens a fuzzy palette for every action, tab,
+  repository, and branch.
+- **Standup digest** — aggregates commits across all tracked repositories for
+  today or the past week and copies a Markdown summary. Local-only and private.
+- **Repository janitor** — finds merged or stale branches, large blobs in
+  history, and common missing `.gitignore` entries, with safe cleanup actions.
+- **Explain changes** — generates an offline review narrative for a branch or
+  commit using file grouping and risk heuristics. On macOS 26+ it can optionally
+  refine the result with Apple’s on-device Foundation Models; the code never
+  leaves the Mac either way.
+
 ## Features
 
 - **Repository sidebar** — add existing repositories, clone from a URL or path,
@@ -97,6 +122,7 @@ sh scripts/make-icon.sh
 | Add existing repository | `⌘O` |
 | Clone repository | `⇧⌘O` |
 | New repository | `⇧⌘N` |
+| Command palette | `⌘K` |
 | New branch | `⇧⌘B` |
 | Refresh | `⌘R` |
 | Fetch / Pull / Push | `⇧⌘F` / `⇧⌘P` / `⌥⌘P` |
@@ -150,9 +176,15 @@ holds extra keys that Xcode does not generate (automatic and sudden termination)
 - History loads the most recent 200 commits.
 - Staging is per file (no line-level partial staging).
 - Stash saves include untracked files by default.
-- GitHub-specific features (pull requests, issues, Actions) are intentionally
-  out of scope; a repository without a remote won't show a *Publish* button —
-  open *Manage Remotes…* (or use `git remote add origin …`) first.
+- Hosting-specific API features (pull request creation, issues, Actions) remain
+  out of scope. The Flow Center opens the provider’s compare page in your browser
+  and generates the PR copy locally instead of calling an API.
+- Safety snapshots live in the repository under `refs/githubflow/…`; they are
+  never pushed and can be deleted from the Safety tab.
+- The on-device explanation refinement requires macOS 26 or later. The offline
+  narrative works on every supported macOS version.
+- A repository without a remote won't show a *Publish* button — open *Manage
+  Remotes…* (or use `git remote add origin …`) first.
 - Merges and cherry-picks that conflict leave the repository in the corresponding
   in-progress state; resolve the marked files in the Changes tab and commit to
   finish.

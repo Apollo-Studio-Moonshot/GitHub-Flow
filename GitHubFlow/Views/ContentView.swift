@@ -27,7 +27,15 @@ struct ContentView: View {
                 BranchManagerSheet()
             case .manageRemotes:
                 RemotesSheet()
+            case .standup:
+                StandupSheet()
+            case .janitor:
+                JanitorSheet()
             }
+        }
+        .sheet(isPresented: $model.showsExplanation) {
+            ExplanationSheet()
+                .environment(model)
         }
         .alert(
             model.alert?.title ?? "",
@@ -105,6 +113,34 @@ struct ContentView: View {
         } message: { stash in
             Text("“\(stash.message)” will be permanently deleted.")
         }
+        .confirmationDialog(
+            "Restore this snapshot?",
+            isPresented: Binding(
+                get: { model.pendingSnapshotRestore != nil },
+                set: { if !$0 { model.pendingSnapshotRestore = nil } }
+            ),
+            presenting: model.pendingSnapshotRestore
+        ) { snapshot in
+            Button("Restore Snapshot") {
+                Task { await model.restoreSnapshot(snapshot) }
+            }
+        } message: { snapshot in
+            Text(restoreMessage(for: snapshot))
+        }
+        .confirmationDialog(
+            "Delete this snapshot?",
+            isPresented: Binding(
+                get: { model.pendingSnapshotDelete != nil },
+                set: { if !$0 { model.pendingSnapshotDelete = nil } }
+            ),
+            presenting: model.pendingSnapshotDelete
+        ) { snapshot in
+            Button("Delete Snapshot", role: .destructive) {
+                Task { await model.deleteSnapshot(snapshot) }
+            }
+        } message: { snapshot in
+            Text("“\(snapshot.message)” will no longer be available for recovery.")
+        }
         .overlay(alignment: .bottom) {
             if let toast = model.toast {
                 ToastView(text: toast.text)
@@ -113,6 +149,15 @@ struct ContentView: View {
             }
         }
         .animation(.spring(duration: 0.32, bounce: 0.18), value: model.toast)
+        .overlay {
+            if model.showsCommandPalette {
+                CommandPaletteView()
+                    .environment(model)
+                    .transition(.opacity)
+                    .zIndex(20)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: model.showsCommandPalette)
         .preferredColorScheme(model.settings.appearance.colorScheme)
     }
 
@@ -122,6 +167,17 @@ struct ContentView: View {
             RepositoryView()
         } else {
             WelcomeView()
+        }
+    }
+
+    private func restoreMessage(for snapshot: RecoverySnapshot) -> String {
+        switch snapshot.kind {
+        case .workingTree:
+            return "The working tree will be restored from this snapshot. The current state is captured first, so this is also reversible."
+        case .commit:
+            return "The repository will return to the commit “\(snapshot.message)” with a soft reset. The index is preserved."
+        case .branch:
+            return "The branch “\(snapshot.branchName ?? "")” will be recreated at \(snapshot.shortSHA). The working tree is not changed."
         }
     }
 }

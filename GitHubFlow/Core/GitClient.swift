@@ -535,6 +535,651 @@ actor GitClient {
         _ = try await run(["init", "-b", "main", url.path], in: nil)
     }
 
+    // MARK: - Flow Center
+
+    /// Computes the branch-readiness summary used by the Flow tab. Everything is
+    /// derived from the local repository; no hosting API or network call is used.
+    func flowSummary(at root: URL, base explicitBase: String? = nil) async throws -> FlowSummary {
+        let branchResult = try await run(
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            in: root,
+            allowFailure: true
+        )
+        let branch = branchResult.succeeded ? branchResult.stdoutTrimmed : ""
+        guard branchResult.succeeded, !branch.isEmpty, branch != "HEAD" else {
+            let symbolic = try await run(["symbolic-ref", "--short", "HEAD"], in: root, allowFailure: true)
+            let unborn = symbolic.succeeded ? symbolic.stdoutTrimmed : ""
+            return FlowSummary(
+                branch: unborn.isEmpty ? "Detached HEAD" : unborn,
+                base: nil,
+                baseIsAuto: true,
+                isOnBase: false,
+                ahead: 0,
+                behind: 0,
+                commitCount: 0,
+                branchAgeDays: nil,
+                lastCommitDate: nil,
+                additions: 0,
+                deletions: 0,
+                filesChanged: 0,
+                hasUpstream: false,
+                uncommittedCount: 0,
+                conflictRisk: nil,
+                checks: [
+                    FlowCheck(
+                        id: "empty",
+                        title: unborn.isEmpty ? "Check out a branch" : "Make your first commit",
+                        detail: unborn.isEmpty
+                            ? "Flow readiness is measured on a branch, not a detached HEAD."
+                            : "Flow readiness starts once this branch has a commit.",
+                        level: .info
+                    )
+                ],
+                groups: [],
+                commitSubjects: [],
+                prTitle: FlowAnalyzer.humanizedBranchName(unborn),
+                prBody: "## Summary\n\nMake a commit to prepare a pull request.",
+                compareURL: nil
+            )
+        }
+
+        let remoteResult = try await run(["remote"], in: root, allowFailure: true)
+        let remotes = remoteResult.stdout
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        let baseInfo = await detectBase(
+            explicit: explicitBase,
+            remotes: remotes,
+            currentBranch: branch,
+            root: root
+        )
+
+        guard let base = baseInfo.ref else {
+            return FlowSummary(
+                branch: branch,
+                base: nil,
+                baseIsAuto: baseInfo.isAuto,
+                isOnBase: false,
+                ahead: 0,
+                behind: 0,
+                commitCount: 0,
+                branchAgeDays: nil,
+                lastCommitDate: nil,
+                additions: 0,
+                deletions: 0,
+                filesChanged: 0,
+                hasUpstream: false,
+                uncommittedCount: 0,
+                conflictRisk: nil,
+                checks: [
+                    FlowCheck(
+                        id: "base",
+                        title: "Choose a base branch",
+                        detail: "Pick the branch this work should merge into.",
+                        level: .info
+                    )
+                ],
+                groups: [],
+                commitSubjects: [],
+                prTitle: FlowAnalyzer.humanizedBranchName(branch),
+                prBody: "## Summary\n\nChoose a base branch to generate a pull request description.",
+                compareURL: nil
+            )
+        }
+
+        let isOnBase = base == branch || shortBase(base, remotes: remotes) == branch
+
+        let counts = try await run(
+            ["rev-list", "--left-right", "--count", "\(base)...HEAD"],
+            in: root,
+            allowFailure: true
+        )
+        var behind = 0
+        var ahead = 0
+        let countParts = counts.stdout.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" })
+        if countParts.count >= 2 {
+            behind = Int(countParts[0]) ?? 0
+            ahead = Int(countParts[1]) ?? 0
+        }
+
+        let numstat = try await run(
+            ["-c", "core.quotePath=false", "diff", "--numstat", "--no-renames", "\(base)...HEAD"],
+            in: root,
+            allowFailure: true
+        )
+        let files = numstat.succeeded ? FlowAnalyzer.parseNumstat(numstat.stdout) : []
+        let groups = FlowAnalyzer.groups(from: files)
+        let additions = files.reduce(0) { $0 + $1.additions }
+        let deletions = files.reduce(0) { $0 + $1.deletions }
+
+        let upstream = try await run(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            in: root,
+            allowFailure: true
+        )
+        let hasUpstream = upstream.succeeded && !upstream.stdoutTrimmed.isEmpty
+
+        let status = try await run(
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            in: root,
+            allowFailure: true
+        )
+        let uncommittedCount = status.succeeded ? GitParsing.parseStatus(status.stdout).count : 0
+
+        let mergeTree = try await run(
+            ["merge-tree", "--write-tree", "--name-only", base, "HEAD"],
+            in: root,
+            allowFailure: true
+        )
+        let conflictRisk: Bool?
+        if mergeTree.succeeded {
+            conflictRisk = false
+        } else if mergeTree.exitCode == 1 {
+            conflictRisk = true
+        } else {
+            conflictRisk = nil
+        }
+
+        let subjectLog = try await run(["log", "--format=%s", "\(base)..HEAD"], in: root, allowFailure: true)
+        let subjects = Array(
+            subjectLog.stdout
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map(String.init)
+                .reversed()
+        )
+
+        let firstCommit = try await run(
+            ["log", "--reverse", "--format=%at", "\(base)..HEAD"],
+            in: root,
+            allowFailure: true
+        )
+        let branchAgeDays: Int?
+        if ahead > 0,
+           let firstLine = firstCommit.stdout.split(separator: "\n").first,
+           let timestamp = TimeInterval(firstLine) {
+            branchAgeDays = max(0, Int((Date().timeIntervalSince1970 - timestamp) / 86_400))
+        } else {
+            branchAgeDays = nil
+        }
+
+        let lastCommit = try await run(["log", "-1", "--format=%at", "HEAD"], in: root, allowFailure: true)
+        let lastCommitDate: Date?
+        if let timestamp = TimeInterval(lastCommit.stdoutTrimmed) {
+            lastCommitDate = Date(timeIntervalSince1970: timestamp)
+        } else {
+            lastCommitDate = nil
+        }
+
+        let primaryRemote = remotes.contains("origin") ? "origin" : remotes.first
+        let remoteURL: String?
+        if let primaryRemote {
+            let urlResult = try await run(["remote", "get-url", primaryRemote], in: root, allowFailure: true)
+            remoteURL = urlResult.succeeded ? urlResult.stdoutTrimmed : nil
+        } else {
+            remoteURL = nil
+        }
+
+        let checks = FlowAnalyzer.checks(
+            isOnBase: isOnBase,
+            ahead: ahead,
+            behind: behind,
+            hasUpstream: hasUpstream,
+            uncommittedCount: uncommittedCount,
+            conflictRisk: conflictRisk,
+            branchAgeDays: branchAgeDays,
+            filesChanged: files.count,
+            additions: additions,
+            deletions: deletions
+        )
+
+        let riskFlags = Array(Set(files.flatMap(\.flags))).sorted()
+        let prTitle = FlowAnalyzer.prTitle(branch: branch, subjects: subjects)
+        let prBody = FlowAnalyzer.prBody(
+            branch: branch,
+            base: base,
+            ahead: ahead,
+            behind: behind,
+            groups: groups,
+            subjects: subjects,
+            riskFlags: riskFlags,
+            additions: additions,
+            deletions: deletions,
+            filesChanged: files.count
+        )
+        let compare = FlowAnalyzer.compareURL(
+            remoteURL: remoteURL,
+            baseRef: shortBase(base, remotes: remotes),
+            branch: branch
+        )
+
+        return FlowSummary(
+            branch: branch,
+            base: base,
+            baseIsAuto: baseInfo.isAuto,
+            isOnBase: isOnBase,
+            ahead: ahead,
+            behind: behind,
+            commitCount: ahead,
+            branchAgeDays: branchAgeDays,
+            lastCommitDate: lastCommitDate,
+            additions: additions,
+            deletions: deletions,
+            filesChanged: files.count,
+            hasUpstream: hasUpstream,
+            uncommittedCount: uncommittedCount,
+            conflictRisk: conflictRisk,
+            checks: checks,
+            groups: groups,
+            commitSubjects: subjects,
+            prTitle: prTitle,
+            prBody: prBody,
+            compareURL: compare
+        )
+    }
+
+    private func detectBase(
+        explicit: String?,
+        remotes: [String],
+        currentBranch: String,
+        root: URL
+    ) async -> (ref: String?, isAuto: Bool) {
+        if let explicit, !explicit.isEmpty {
+            if await refExists(explicit, in: root) { return (explicit, false) }
+        }
+
+        let candidates = ["main", "master", "develop", "trunk"]
+        let orderedRemotes = remotes.sorted { lhs, rhs in
+            func rank(_ name: String) -> Int {
+                switch name {
+                case "origin": 0
+                case "upstream": 1
+                default: 2
+                }
+            }
+            if rank(lhs) != rank(rhs) { return rank(lhs) < rank(rhs) }
+            return lhs < rhs
+        }
+
+        for remote in orderedRemotes {
+            for name in candidates {
+                let ref = "\(remote)/\(name)"
+                if await refExists(ref, in: root) { return (ref, true) }
+            }
+        }
+
+        for name in candidates where name != currentBranch {
+            if await refExists(name, in: root) { return (name, true) }
+        }
+
+        return (nil, true)
+    }
+
+    private func refExists(_ ref: String, in root: URL) async -> Bool {
+        guard let result = try? await run(
+            ["rev-parse", "--verify", "--quiet", ref],
+            in: root,
+            allowFailure: true
+        ) else { return false }
+        return result.succeeded
+    }
+
+    private func shortBase(_ ref: String, remotes: [String]) -> String {
+        guard let slash = ref.firstIndex(of: "/") else { return ref }
+        let prefix = String(ref[..<slash])
+        guard remotes.contains(prefix) || ["origin", "upstream", "fork"].contains(prefix) else {
+            return ref
+        }
+        return String(ref[ref.index(after: slash)...])
+    }
+
+    // MARK: - Safety Net
+
+    /// Captures the whole working tree (tracked files plus untracked, non-ignored
+    /// files) into an unreachable snapshot commit without touching the real index.
+    func createWorktreeSnapshot(
+        label: String,
+        at root: URL,
+        hasCommits: Bool,
+        identity: GitIdentity?
+    ) async throws -> RecoverySnapshot {
+        let gitDirectory = try await absoluteGitDirectory(at: root)
+        let indexURL = gitDirectory.appendingPathComponent("githubflow-snapshot-index-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: indexURL) }
+
+        let environment = ["GIT_INDEX_FILE": indexURL.path]
+        if hasCommits {
+            _ = try await run(["read-tree", "HEAD"], in: root, extraEnvironment: environment)
+        } else {
+            _ = try await run(["read-tree", "--empty"], in: root, extraEnvironment: environment)
+        }
+        _ = try await run(
+            ["-c", "core.quotePath=false", "add", "-A"],
+            in: root,
+            extraEnvironment: environment
+        )
+        let tree = try await run(["write-tree"], in: root, extraEnvironment: environment).stdoutTrimmed
+
+        var arguments = ["commit-tree", tree, "-m", "Working tree snapshot · \(label)"]
+        if hasCommits { arguments += ["-p", "HEAD"] }
+        let commit = try await run(
+            arguments,
+            in: root,
+            extraEnvironment: snapshotEnvironment(identity)
+        ).stdoutTrimmed
+
+        let creation = Int(Date().timeIntervalSince1970)
+        let ref = "refs/githubflow/worktree/\(creation)-\(String(UUID().uuidString.prefix(8)))"
+        _ = try await run(["update-ref", ref, commit], in: root)
+
+        return RecoverySnapshot(
+            ref: ref,
+            sha: commit,
+            date: Date(timeIntervalSince1970: TimeInterval(creation)),
+            message: "Working tree snapshot · \(label)",
+            kind: .workingTree,
+            branchName: nil
+        )
+    }
+
+    /// Points a recovery ref at the current HEAD so an undone commit can be
+    /// restored with a soft reset.
+    func createCommitSnapshot(at root: URL) async throws -> RecoverySnapshot {
+        let head = try await run(["rev-parse", "HEAD"], in: root).stdoutTrimmed
+        let creation = Int(Date().timeIntervalSince1970)
+        let ref = "refs/githubflow/commit/\(creation)-\(String(UUID().uuidString.prefix(8)))"
+        _ = try await run(["update-ref", ref, head], in: root)
+        let subject = try await run(
+            ["log", "-1", "--format=%s", head],
+            in: root,
+            allowFailure: true
+        ).stdoutTrimmed
+        return RecoverySnapshot(
+            ref: ref,
+            sha: head,
+            date: Date(timeIntervalSince1970: TimeInterval(creation)),
+            message: subject.isEmpty ? "Commit snapshot" : subject,
+            kind: .commit,
+            branchName: nil
+        )
+    }
+
+    /// Remembers a branch tip before the branch is deleted. The snapshot ref
+    /// points at a small marker commit whose parent is the original tip.
+    func createBranchSnapshot(
+        branch: String,
+        at root: URL,
+        identity: GitIdentity?
+    ) async throws -> RecoverySnapshot {
+        let tip = try await run(["rev-parse", "--verify", branch], in: root).stdoutTrimmed
+        let tree = try await run(["rev-parse", "--verify", "\(branch)^{tree}"], in: root).stdoutTrimmed
+        let marker = try await run(
+            ["commit-tree", tree, "-p", tip, "-m", "Branch snapshot: \(branch)"],
+            in: root,
+            extraEnvironment: snapshotEnvironment(identity)
+        ).stdoutTrimmed
+
+        let creation = Int(Date().timeIntervalSince1970)
+        let ref = "refs/githubflow/branch/\(creation)-\(String(UUID().uuidString.prefix(8)))"
+        _ = try await run(["update-ref", ref, marker], in: root)
+
+        return RecoverySnapshot(
+            ref: ref,
+            sha: tip,
+            date: Date(timeIntervalSince1970: TimeInterval(creation)),
+            message: "Branch snapshot: \(branch)",
+            kind: .branch,
+            branchName: branch
+        )
+    }
+
+    func recoverySnapshots(at root: URL) async throws -> [RecoverySnapshot] {
+        let format = ["%(refname)", "%(objectname)", "%(parent)", "%(contents:subject)"]
+            .joined(separator: "%1f")
+        let result = try await run(
+            ["for-each-ref", "--format=\(format)", "refs/githubflow"],
+            in: root,
+            allowFailure: true
+        )
+        guard result.succeeded else { return [] }
+
+        var snapshots: [RecoverySnapshot] = []
+        for line in result.stdout.split(separator: "\n") {
+            let fields = line.split(separator: "\u{1f}", omittingEmptySubsequences: false).map(String.init)
+            guard fields.count >= 4 else { continue }
+
+            let ref = fields[0]
+            let oid = fields[1]
+            let parents = fields[2]
+            let subject = fields[3]
+
+            let kind: RecoverySnapshot.Kind
+            if ref.hasPrefix("refs/githubflow/worktree/") {
+                kind = .workingTree
+            } else if ref.hasPrefix("refs/githubflow/commit/") {
+                kind = .commit
+            } else if ref.hasPrefix("refs/githubflow/branch/") {
+                kind = .branch
+            } else {
+                continue
+            }
+
+            let parent = parents.split(separator: " ").first.map(String.init)
+            let sha = kind == .branch ? (parent ?? oid) : oid
+            let branchName = kind == .branch
+                ? subject.replacingOccurrences(of: "Branch snapshot: ", with: "")
+                : nil
+
+            snapshots.append(
+                RecoverySnapshot(
+                    ref: ref,
+                    sha: sha,
+                    date: snapshotDate(from: ref),
+                    message: subject,
+                    kind: kind,
+                    branchName: branchName
+                )
+            )
+        }
+
+        return snapshots.sorted { $0.date > $1.date }
+    }
+
+    func restoreWorktreeSnapshot(sha: String, at root: URL) async throws {
+        _ = try await run(
+            ["-c", "core.quotePath=false", "checkout", sha, "--", "."],
+            in: root
+        )
+    }
+
+    func restoreCommitSnapshot(sha: String, at root: URL) async throws {
+        _ = try await run(["reset", "--soft", sha], in: root)
+    }
+
+    func restoreBranchSnapshot(name: String, sha: String, at root: URL) async throws {
+        if await refExists("refs/heads/\(name)", in: root) {
+            throw GitError.invalidInput("A branch named “\(name)” already exists.")
+        }
+        _ = try await run(["branch", name, sha], in: root)
+    }
+
+    func deleteSnapshot(ref: String, at root: URL) async throws {
+        _ = try await run(["update-ref", "-d", ref], in: root)
+    }
+
+    private func absoluteGitDirectory(at root: URL) async throws -> URL {
+        let result = try await run(["rev-parse", "--absolute-git-dir"], in: root)
+        return URL(fileURLWithPath: result.stdoutTrimmed)
+    }
+
+    private func snapshotEnvironment(_ identity: GitIdentity?) -> [String: String] {
+        var environment = identityEnvironment(identity)
+        if environment["GIT_AUTHOR_NAME"] == nil {
+            environment["GIT_AUTHOR_NAME"] = "GitHub Flow"
+            environment["GIT_AUTHOR_EMAIL"] = "githubflow@local"
+        }
+        if environment["GIT_COMMITTER_NAME"] == nil {
+            environment["GIT_COMMITTER_NAME"] = environment["GIT_AUTHOR_NAME"]
+        }
+        if environment["GIT_COMMITTER_EMAIL"] == nil {
+            environment["GIT_COMMITTER_EMAIL"] = environment["GIT_AUTHOR_EMAIL"]
+        }
+        return environment
+    }
+
+    private func snapshotDate(from ref: String) -> Date {
+        guard let component = ref.split(separator: "/").last,
+              let stamp = component.split(separator: "-").first,
+              let value = TimeInterval(stamp) else {
+            return .distantPast
+        }
+        return Date(timeIntervalSince1970: value)
+    }
+
+    // MARK: - Standup & janitor
+
+    /// Recent commits across every ref except the app's own recovery refs.
+    func recentCommits(
+        at root: URL,
+        since: Date,
+        author: String?,
+        limit: Int = 300
+    ) async throws -> [CommitInfo] {
+        let format = ["%H", "%h", "%an", "%ae", "%at", "%P", "%D", "%s"]
+            .joined(separator: "%x1f")
+        var arguments = [
+            "log", "-z", "--branches", "--remotes", "--tags", "--date-order",
+            "--max-count=\(limit)", "--since=@\(Int(since.timeIntervalSince1970))",
+            "--pretty=format:\(format)"
+        ]
+        if let author, !author.isEmpty {
+            arguments.insert("--author=\(author)", at: 1)
+        }
+        let result = try await run(arguments, in: root, allowFailure: true)
+        guard result.succeeded else { return [] }
+        return GitParsing.parseCommits(result.stdout)
+    }
+
+    func staleBranches(at root: URL, base: String?) async throws -> [StaleBranch] {
+        let all = try await branches(at: root)
+        let local = all.filter { !$0.isRemote && !$0.isCurrent }
+        let reference = base ?? "HEAD"
+        let threshold = Date().addingTimeInterval(-30 * 86_400)
+
+        var result: [StaleBranch] = []
+        for branch in local {
+            let mergedResult = try await run(
+                ["merge-base", "--is-ancestor", branch.name, reference],
+                in: root,
+                allowFailure: true
+            )
+            let merged = mergedResult.succeeded
+            let stale = branch.lastCommitDate < threshold
+            guard merged || stale else { continue }
+
+            result.append(
+                StaleBranch(
+                    name: branch.name,
+                    sha: branch.sha,
+                    subject: branch.subject,
+                    date: branch.lastCommitDate,
+                    isMerged: merged,
+                    reason: merged ? "Merged into \(reference)" : "No commits in 30 days"
+                )
+            )
+        }
+
+        return result.sorted { lhs, rhs in
+            if lhs.isMerged != rhs.isMerged { return lhs.isMerged }
+            return lhs.date < rhs.date
+        }
+    }
+
+    func largeObjects(
+        at root: URL,
+        minimumBytes: Int = 1_000_000,
+        limit: Int = 25
+    ) async throws -> [LargeObject] {
+        let revList = try await run(["rev-list", "--objects", "--all"], in: root, allowFailure: true)
+        guard revList.succeeded, !revList.stdout.isEmpty else { return [] }
+
+        let batch = try await run(
+            ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize) %(rest)"],
+            in: root,
+            allowFailure: true,
+            input: revList.stdout
+        )
+        guard batch.succeeded else { return [] }
+
+        var byOID: [String: LargeObject] = [:]
+        for line in batch.stdout.split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: false)
+            guard parts.count == 4, parts[1] == "blob" else { continue }
+            let size = Int64(parts[2]) ?? 0
+            guard size >= Int64(minimumBytes) else { continue }
+            let oid = String(parts[0])
+            let path = String(parts[3])
+            if let existing = byOID[oid], existing.size >= size { continue }
+            byOID[oid] = LargeObject(oid: oid, path: path, size: size)
+        }
+
+        return Array(byOID.values.sorted { $0.size > $1.size }.prefix(limit))
+    }
+
+    func ignoreSuggestions(at root: URL) async throws -> [GitignoreSuggestion] {
+        let candidates: [(path: String, pattern: String, reason: String)] = [
+            (".DS_Store", ".DS_Store", "Finder metadata"),
+            ("node_modules", "node_modules/", "Node dependencies"),
+            (".build", ".build/", "Swift build products"),
+            ("build", "build/", "Build output"),
+            ("DerivedData", "DerivedData/", "Xcode derived data"),
+            (".env", ".env", "Local secrets"),
+            ("__pycache__", "__pycache__/", "Python bytecode"),
+            (".venv", ".venv/", "Python virtual environment"),
+            ("target", "target/", "Rust/Java build output")
+        ]
+
+        let gitignoreURL = root.appendingPathComponent(".gitignore")
+        let existing = (try? String(contentsOf: gitignoreURL, encoding: .utf8)) ?? ""
+        let existingLines = Set(
+            existing.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        )
+
+        var suggestions: [GitignoreSuggestion] = []
+        for candidate in candidates {
+            guard FileManager.default.fileExists(atPath: root.appendingPathComponent(candidate.path).path) else {
+                continue
+            }
+            let ignored = try await run(
+                ["check-ignore", "-q", "--", candidate.path],
+                in: root,
+                allowFailure: true
+            ).succeeded
+            guard !ignored, !existingLines.contains(candidate.pattern) else { continue }
+            suggestions.append(
+                GitignoreSuggestion(pattern: candidate.pattern, reason: candidate.reason)
+            )
+        }
+        return suggestions
+    }
+
+    func appendGitignore(_ patterns: [String], at root: URL) async throws {
+        guard !patterns.isEmpty else { return }
+        let url = root.appendingPathComponent(".gitignore")
+        var contents = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let existing = Set(contents.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) })
+        let additions = patterns.filter { !existing.contains($0) }
+        guard !additions.isEmpty else { return }
+
+        if !contents.isEmpty, !contents.hasSuffix("\n") { contents += "\n" }
+        if !contents.contains("# Added by GitHub Flow") {
+            if !contents.isEmpty { contents += "\n" }
+            contents += "# Added by GitHub Flow\n"
+        }
+        contents += additions.joined(separator: "\n") + "\n"
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - Helpers
 
     private func identityEnvironment(_ identity: GitIdentity?) -> [String: String] {
