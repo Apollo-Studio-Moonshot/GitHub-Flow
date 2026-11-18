@@ -16,8 +16,8 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "66F7D717E301B66E0EBA984E"
-               BuildableName = "GitHubFlow.app"
+               BlueprintIdentifier = "AAAAAAAAAAAAAAAAAAAA0002"
+               BuildableName = "GitHub Flow.app"
                BlueprintName = "GitHubFlow"
                ReferencedContainer = "container:GitHubFlow.xcodeproj">
             </BuildableReference>
@@ -30,7 +30,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "EA723E26716546EB6556AD2F"
+               BlueprintIdentifier = "AAAAAAAAAAAAAAAAAAAA0003"
                BuildableName = "GitHubFlowTests.xctest"
                BlueprintName = "GitHubFlowTests"
                ReferencedContainer = "container:GitHubFlow.xcodeproj">
@@ -48,8 +48,8 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "66F7D717E301B66E0EBA984E"
-            BuildableName = "GitHubFlow.app"
+            BlueprintIdentifier = "AAAAAAAAAAAAAAAAAAAA0002"
+            BuildableName = "GitHub Flow.app"
             BlueprintName = "GitHubFlow"
             ReferencedContainer = "container:GitHubFlow.xcodeproj">
          </BuildableReference>
@@ -60,7 +60,7 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "EA723E26716546EB6556AD2F"
+               BlueprintIdentifier = "AAAAAAAAAAAAAAAAAAAA0003"
                BuildableName = "GitHubFlowTests.xctest"
                BlueprintName = "GitHubFlowTests"
                ReferencedContainer = "container:GitHubFlow.xcodeproj">
@@ -84,8 +84,8 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "66F7D717E301B66E0EBA984E"
-            BuildableName = "GitHubFlow.app"
+            BlueprintIdentifier = "AAAAAAAAAAAAAAAAAAAA0002"
+            BuildableName = "GitHub Flow.app"
             BlueprintName = "GitHubFlow"
             ReferencedContainer = "container:GitHubFlow.xcodeproj">
          </BuildableReference>
@@ -103,8 +103,8 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "66F7D717E301B66E0EBA984E"
-            BuildableName = "GitHubFlow.app"
+            BlueprintIdentifier = "AAAAAAAAAAAAAAAAAAAA0002"
+            BuildableName = "GitHub Flow.app"
             BlueprintName = "GitHubFlow"
             ReferencedContainer = "container:GitHubFlow.xcodeproj">
          </BuildableReference>

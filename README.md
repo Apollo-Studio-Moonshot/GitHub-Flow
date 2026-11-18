@@ -69,7 +69,7 @@ xcodebuild -project GitHubFlow.xcodeproj -scheme GitHubFlow test
 ```
 
 To produce a distributable `.app` bundle (ad-hoc signed, includes the icon and
-Info.plist):
+generated Info.plist):
 
 ```sh
 sh scripts/build-app.sh
@@ -98,28 +98,31 @@ sh scripts/make-icon.sh
 
 ```
 GitHubFlow.xcodeproj/   Xcode project (shared GitHubFlow scheme)
-project.yml             XcodeGen spec used to regenerate the project file
-Sources/GitHubFlow/
+GitHubFlow/
   App/            App entry point, menu commands, AppKit delegate
   Core/           ProcessRunner, GitClient (actor), parsers for status/log/diff
   Models/         Domain types, AppModel (single source of truth), persistence
   Design/         Theme, reusable buttons, avatars, pills, empty states
   Views/          Sidebar, welcome, repository header, changes, history, diff,
                   sheets, settings
-Tests/GitHubFlowTests/
+  Assets.xcassets App icon (all macOS icon sizes)
+  Info.plist      Extra keys merged into the generated Info.plist
+GitHubFlowTests/
                   Parser unit tests + end-to-end GitClient tests
 scripts/          App bundle, icon generation
-Support/          Info.plist, generated AppIcon.icns
+docs/             Screenshots
 ```
 
-`GitHubFlow.xcodeproj` is generated from `project.yml` with
-[XcodeGen](https://github.com/yonaskolb/XcodeGen). The generated project is
-checked in, so XcodeGen is only needed if you add or remove files outside of
-Xcode and want to refresh the project:
+The app and test targets use Xcode's file-system synchronized groups, so any
+file added under `GitHubFlow/` or `GitHubFlowTests/` is picked up automatically
+— no project-file edits or code-generation step required.
 
-```sh
-xcodegen generate
-```
+### Versioning
+
+The bundle version comes from the target's build settings, so it can be edited
+in Xcode under **General → Identity** (Version / Build) or under **Build
+Settings** (`MARKETING_VERSION`, `CURRENT_PROJECT_VERSION`). `Info.plist` only
+holds extra keys that Xcode does not generate (automatic and sudden termination).
 
 ### Concurrency model
 

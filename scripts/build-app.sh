@@ -16,7 +16,7 @@ xcodebuild \
     build
 
 rm -rf "$APP_DIR"
-ditto "$DERIVED_DATA/Build/Products/$CONFIGURATION/GitHubFlow.app" "$APP_DIR"
+ditto "$DERIVED_DATA/Build/Products/$CONFIGURATION/GitHub Flow.app" "$APP_DIR"
 
 echo "Built $APP_DIR"
 echo "Launch it with: open \"$APP_DIR\""
