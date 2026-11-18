@@ -16,10 +16,24 @@ struct ToastMessage: Identifiable, Equatable {
 enum MainTab: String, CaseIterable, Identifiable, Hashable {
     case changes
     case history
+    case stashes
 
     var id: String { rawValue }
-    var title: String { self == .changes ? "Changes" : "History" }
-    var symbol: String { self == .changes ? "square.stack.3d.up" : "clock.arrow.circlepath" }
+    var title: String {
+        switch self {
+        case .changes: "Changes"
+        case .history: "History"
+        case .stashes: "Stashes"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .changes: "square.stack.3d.up"
+        case .history: "clock.arrow.circlepath"
+        case .stashes: "archivebox"
+        }
+    }
 }
 
 enum SheetRoute: String, Identifiable, Hashable {
@@ -71,6 +85,7 @@ final class AppModel {
     var commitSummary = ""
     var commitDescription = ""
     var isDescriptionExpanded = false
+    var stashMessage = ""
 
     var selectedChangeID: FileChange.ID? {
         didSet {
@@ -101,6 +116,7 @@ final class AppModel {
     var sheet: SheetRoute?
     var pendingRevert: CommitInfo?
     var pendingDiscard: FileChange?
+    var pendingStashDrop: StashInfo?
     var showsDiscardAllConfirmation = false
 
     // MARK: - Generation tokens
@@ -140,6 +156,7 @@ final class AppModel {
     var stagedChanges: [FileChange] { snapshot?.stagedChanges ?? [] }
     var unstagedChanges: [FileChange] { snapshot?.unstagedChanges ?? [] }
     var allChanges: [FileChange] { snapshot?.changes ?? [] }
+    var stashes: [StashInfo] { snapshot?.stashes ?? [] }
 
     var filteredStagedChanges: [FileChange] { filterChanges(stagedChanges) }
     var filteredUnstagedChanges: [FileChange] { filterChanges(unstagedChanges) }
@@ -206,6 +223,7 @@ final class AppModel {
         commitSummary = ""
         commitDescription = ""
         isDescriptionExpanded = false
+        stashMessage = ""
         changesSearch = ""
         historySearch = ""
         isLoading = true
@@ -418,6 +436,60 @@ final class AppModel {
                 hasCommits: self.snapshot?.hasCommits ?? false
             )
         }
+        await refresh(showSpinner: false)
+    }
+
+    // MARK: - Stashes
+
+    func saveStash() async {
+        guard let repository = selectedRepository else { return }
+        guard !allChanges.isEmpty else {
+            present(title: "Nothing to stash", message: "There are no local changes to save.")
+            return
+        }
+
+        let message = stashMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        let succeeded = await withActivity("Saving stash…") { () -> Bool in
+            try await self.git.createStash(
+                message: message.isEmpty ? nil : message,
+                at: repository.url
+            )
+            return true
+        }
+        if succeeded == true {
+            stashMessage = ""
+            showToast("Saved changes to a stash")
+        }
+        await refresh(showSpinner: false)
+    }
+
+    func applyStash(_ stash: StashInfo) async {
+        guard let repository = selectedRepository else { return }
+        let succeeded = await withActivity("Applying stash…") { () -> Bool in
+            try await self.git.applyStash(sha: stash.sha, at: repository.url)
+            return true
+        }
+        if succeeded == true { showToast("Applied “\(stash.message)”") }
+        await refresh(showSpinner: false)
+    }
+
+    func popStash(_ stash: StashInfo) async {
+        guard let repository = selectedRepository else { return }
+        let succeeded = await withActivity("Popping stash…") { () -> Bool in
+            try await self.git.popStash(sha: stash.sha, at: repository.url)
+            return true
+        }
+        if succeeded == true { showToast("Applied and removed “\(stash.message)”") }
+        await refresh(showSpinner: false)
+    }
+
+    func dropStash(_ stash: StashInfo) async {
+        guard let repository = selectedRepository else { return }
+        let succeeded = await withActivity("Dropping stash…") { () -> Bool in
+            try await self.git.dropStash(sha: stash.sha, at: repository.url)
+            return true
+        }
+        if succeeded == true { showToast("Dropped “\(stash.message)”") }
         await refresh(showSpinner: false)
     }
 

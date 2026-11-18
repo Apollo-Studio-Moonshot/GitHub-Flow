@@ -172,6 +172,46 @@ final class GitClientTests: XCTestCase {
         XCTAssertEqual(snapshot.branch, "main")
     }
 
+    func testStashManagementIncludesUntrackedAndSupportsApplyPopAndDrop() async throws {
+        let client = GitClient()
+
+        try write("original\n", to: "tracked.txt")
+        try git(["add", "--all"])
+        try git(["commit", "-q", "-m", "Initial"])
+
+        try write("updated\n", to: "tracked.txt")
+        try write("new\n", to: "untracked.txt")
+        try await client.createStash(message: "Saved work", at: repoURL)
+
+        var snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertTrue(snapshot.changes.isEmpty)
+        XCTAssertEqual(snapshot.stashes.count, 1)
+        let stash = try XCTUnwrap(snapshot.stashes.first)
+        XCTAssertTrue(stash.message.contains("Saved work"))
+        XCTAssertEqual(stash.reference, "stash@{0}")
+
+        try await client.applyStash(sha: stash.sha, at: repoURL)
+        snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertEqual(Set(snapshot.changes.map(\.path)), ["tracked.txt", "untracked.txt"])
+        XCTAssertEqual(snapshot.stashes.count, 1)
+
+        try git(["reset", "--hard", "HEAD"])
+        try git(["clean", "-fd"])
+        try await client.popStash(sha: stash.sha, at: repoURL)
+        snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertEqual(Set(snapshot.changes.map(\.path)), ["tracked.txt", "untracked.txt"])
+        XCTAssertTrue(snapshot.stashes.isEmpty)
+
+        try await client.createStash(message: nil, at: repoURL)
+        let remainingStashes = try await client.listStashes(at: repoURL)
+        let droppedStash = try XCTUnwrap(remainingStashes.first)
+        try await client.dropStash(sha: droppedStash.sha, at: repoURL)
+
+        snapshot = try await client.snapshot(at: repoURL)
+        XCTAssertTrue(snapshot.stashes.isEmpty)
+        XCTAssertTrue(snapshot.changes.isEmpty)
+    }
+
     // MARK: - Helpers
 
     private func write(_ contents: String, to relativePath: String) throws {

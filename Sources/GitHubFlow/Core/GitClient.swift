@@ -110,6 +110,7 @@ actor GitClient {
         }
 
         let operation = await detectOperation(in: root)
+        let stashes = try await listStashes(at: root)
 
         return RepoSnapshot(
             rootPath: root.path,
@@ -123,6 +124,7 @@ actor GitClient {
             hasUpstream: hasUpstream,
             changes: changes,
             branches: branches,
+            stashes: stashes,
             operation: operation
         )
     }
@@ -247,6 +249,68 @@ actor GitClient {
                 }
             }
         }
+    }
+
+    // MARK: - Stashes
+
+    func listStashes(at root: URL) async throws -> [StashInfo] {
+        let format = ["%gd", "%H", "%at", "%gs"].joined(separator: "%x1f")
+        let result = try await run(
+            ["stash", "list", "--format=\(format)"],
+            in: root
+        )
+        guard !result.stdout.isEmpty else { return [] }
+
+        return try result.stdout.split(separator: "\n").map { line in
+            let fields = line.split(separator: "\u{1f}", maxSplits: 3, omittingEmptySubsequences: false)
+            guard fields.count == 4,
+                  let timestamp = TimeInterval(fields[2]) else {
+                throw GitError.commandFailed(
+                    command: "git stash list",
+                    message: "Git returned an invalid stash entry."
+                )
+            }
+            return StashInfo(
+                reference: String(fields[0]),
+                sha: String(fields[1]),
+                message: String(fields[3]),
+                date: Date(timeIntervalSince1970: timestamp)
+            )
+        }
+    }
+
+    func createStash(message: String?, at root: URL) async throws {
+        let previousStashes = try await listStashes(at: root)
+        var arguments = ["stash", "push", "--include-untracked"]
+        if let message, !message.isEmpty {
+            arguments += ["--message", message]
+        }
+        _ = try await run(arguments, in: root)
+
+        let currentStashes = try await listStashes(at: root)
+        guard currentStashes.count > previousStashes.count else {
+            throw GitError.invalidInput("There are no local changes to stash.")
+        }
+    }
+
+    func applyStash(sha: String, at root: URL) async throws {
+        _ = try await run(["stash", "apply", sha], in: root)
+    }
+
+    func popStash(sha: String, at root: URL) async throws {
+        let stashes = try await listStashes(at: root)
+        guard let stash = stashes.first(where: { $0.sha == sha }) else {
+            throw GitError.invalidInput("This stash no longer exists.")
+        }
+        _ = try await run(["stash", "pop", stash.reference], in: root)
+    }
+
+    func dropStash(sha: String, at root: URL) async throws {
+        let stashes = try await listStashes(at: root)
+        guard let stash = stashes.first(where: { $0.sha == sha }) else {
+            throw GitError.invalidInput("This stash no longer exists.")
+        }
+        _ = try await run(["stash", "drop", stash.reference], in: root)
     }
 
     // MARK: - Commit
